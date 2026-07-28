@@ -1,0 +1,64 @@
+[project]
+name = "deepen-bag-check"
+version = "1.0.0"
+description = "Validate a rosbag before submitting it for multi-sensor calibration — no ROS install required."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+authors = [{ name = "Deepen AI", email = "eng@deepen.ai" }]
+keywords = ["ros", "ros2", "rosbag", "mcap", "lidar", "calibration", "robotics", "autonomous-vehicles"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = [
+    "rosbags==0.9.23",
+    "mcap==1.4.0",
+    "mcap-ros2-support==0.5.7",
+    "pyyaml>=6.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/deepenai/deepen-bag-check"
+Repository = "https://github.com/deepenai/deepen-bag-check"
+Issues = "https://github.com/deepenai/deepen-bag-check/issues"
+
+[project.scripts]
+deepen-bag-check = "bagcheck.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "numpy>=1.24",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["bagcheck"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+# E501: line length is handled by intent, not a hard wrap.
+# UP042: str+Enum (not enum.StrEnum) is a deliberate, explicit choice used throughout
+# this package, kept for clarity over the newer syntax.
+ignore = ["E501", "UP042"]
