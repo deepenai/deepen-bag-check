@@ -14,7 +14,7 @@ def test_cli_json_output_and_exit_code(tmp_path: Path, capsys) -> None:
 
     expected_exit = {"passed": 0, "warnings": 1, "failed": 2}[report["status"]]
     assert exit_code == expected_exit
-    assert report["schema_version"] == "1.1"
+    assert report["schema_version"] == "1.2"
     assert report["container_format"] == "ros1_bag"
 
 

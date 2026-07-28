@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from bagcheck import checks as _checks
-from bagcheck.classify import classify_topic, raw_lidar_vendor
+from bagcheck.classify import classify_pointcloud_role, classify_topic, raw_lidar_vendor
 from bagcheck.containers import BagCheckError, UnsupportedContainerError, detect_container
 from bagcheck.coverage import check_coverage
 from bagcheck.model import (
@@ -29,7 +29,7 @@ from bagcheck.readers import BagReader, open_reader
 DEFAULT_MIN_DURATION_S = _checks.DEFAULT_MIN_DURATION_S
 
 _TF_ROLES = (TopicRole.TF, TopicRole.TF_STATIC)
-_SENSOR_ROLES = (*CAMERA_ROLES, TopicRole.LIDAR, TopicRole.LIDAR_RAW, TopicRole.IMU)
+_SENSOR_ROLES = (*CAMERA_ROLES, TopicRole.LIDAR, TopicRole.LIDAR_RAW, TopicRole.RADAR, TopicRole.IMU)
 
 
 def run_checks(
@@ -81,7 +81,7 @@ def _scan(
 
     reader_start, reader_end = reader.start_ns, reader.end_ns
     duration_s = (reader_end - reader_start) / 1e9 if reader_start is not None and reader_end is not None else 0.0
-    _enrich_topic_summaries(topics, scan)
+    checks.extend(_enrich_topic_summaries(topics, scan))
 
     checks.append(_checks.check_duration(duration_s, min_duration_s))
     checks.extend(_checks.check_lidar_raw_packets(topics))
@@ -124,6 +124,7 @@ class _ScanResult:
         self.topic_timestamps: dict[str, list[int]] = {}
         self.imu_samples: list[tuple[int, float]] = []
         self.pointcloud_fields: dict[str, dict[str, str]] = {}
+        self.pointcloud_point_counts: dict[str, int] = {}
         self.camera_info_k: dict[str, list[float]] = {}
         self.camera_encoding: dict[str, str] = {}
         self.sensor_frame_ids: dict[str, str] = {}
@@ -159,6 +160,11 @@ def _stream_messages(reader: BagReader, role_by_topic: dict[str, TopicRole]) -> 
                 scan.pointcloud_fields[msg.topic] = {
                     f.name: POINTFIELD_DATATYPE_NAMES.get(int(f.datatype), "?") for f in decoded.fields
                 }
+                # width * height per PointCloud2's own definition (matches the real
+                # Foxglove bag numbers cited in classify.py: radar ~20-30, lidar ~40,000)
+                # — the density signal `classify_pointcloud_role` needs for the topics
+                # whose field schema alone doesn't say radar or lidar.
+                scan.pointcloud_point_counts[msg.topic] = int(decoded.width) * int(decoded.height)
                 scan.sensor_frame_ids[msg.topic] = decoded.header.frame_id
 
         elif role is TopicRole.CAMERA_INFO and msg.topic not in sampled:
@@ -190,7 +196,16 @@ def _stream_messages(reader: BagReader, role_by_topic: dict[str, TopicRole]) -> 
     return scan
 
 
-def _enrich_topic_summaries(topics: list[TopicSummary], scan: _ScanResult) -> None:
+def _enrich_topic_summaries(topics: list[TopicSummary], scan: _ScanResult) -> list[CheckResult]:
+    """Mutates each `TopicSummary` in place (hz, vendor_signature, encoding, ...) and,
+    for `TopicRole.LIDAR` topics, runs the radar/lidar discriminator on the decoded
+    sample (`classify.classify_pointcloud_role`) — reassigning `t.role` to `RADAR` or
+    `LIDAR_AMBIGUOUS` when the schema/density signals say so. Returns the check(s) that
+    reclassification produces (a WARN for the ambiguous case, an informational note for
+    a confident radar call) — `_pointcloud_checks`, called after this, only evaluates
+    topics still classified `TopicRole.LIDAR`, so a reclassified topic is automatically
+    excluded from lidar-specific field-schema checks too."""
+    role_checks: list[CheckResult] = []
     for t in topics:
         stamps = scan.topic_timestamps.get(t.topic, [])
         if len(stamps) >= 2:
@@ -199,13 +214,32 @@ def _enrich_topic_summaries(topics: list[TopicSummary], scan: _ScanResult) -> No
         if t.role is TopicRole.LIDAR:
             fields = scan.pointcloud_fields.get(t.topic)
             if fields:
-                roles = normalize_fields(fields)
-                t.vendor_signature = roles.vendor_signature
-                t.has_per_point_time = roles.has_per_point_time
+                decision = classify_pointcloud_role(
+                    t.topic, set(fields), scan.pointcloud_point_counts.get(t.topic)
+                )
+                if decision.role is TopicRole.LIDAR:
+                    roles = normalize_fields(fields)
+                    t.vendor_signature = roles.vendor_signature
+                    t.has_per_point_time = roles.has_per_point_time
+                else:
+                    t.role = decision.role
+                    role_checks.append(
+                        CheckResult(
+                            id="sensor_role_ambiguous"
+                            if decision.role is TopicRole.LIDAR_AMBIGUOUS
+                            else "sensor_role_radar",
+                            status=CheckStatus.WARN
+                            if decision.role is TopicRole.LIDAR_AMBIGUOUS
+                            else CheckStatus.PASS,
+                            topic=t.topic,
+                            message=decision.reason or "",
+                        )
+                    )
         if t.role is TopicRole.LIDAR_RAW:
             t.vendor_signature = raw_lidar_vendor(t.msgtype)
         if t.role in CAMERA_ROLES:
             t.encoding = scan.camera_encoding.get(t.topic)
+    return role_checks
 
 
 def _pointcloud_checks(topics: list[TopicSummary], pointcloud_fields: dict[str, dict[str, str]]) -> list[CheckResult]:

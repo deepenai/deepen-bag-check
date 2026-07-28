@@ -15,6 +15,7 @@ from bagcheck.model import (
     ValidationReport,
 )
 from tests.bagcheck.conftest import (
+    RADAR_FIELD_LAYOUTS,
     VENDOR_FIELD_LAYOUTS,
     camera_info_spec,
     compressed_image_spec,
@@ -179,6 +180,99 @@ def test_raw_hesai_lidar_topics_make_multi_lidar_and_lidar_imu_eligible(tmp_path
     assert all(c.status is CheckStatus.PASS for c in raw_packet_checks)
 
 
+def test_radar_pointcloud2_not_counted_as_lidar_regression(tmp_path: Path) -> None:
+    # Regression for the real false positive found against the public Foxglove demo
+    # bag: a genuine RADAR topic publishing sensor_msgs/PointCloud2 with no vendor
+    # field names at all (x,y,z only) and a sparse point count — exactly
+    # `/radar/points` in that bag (20-30 points/message vs `/velodyne_points`'
+    # ~40,000). Before this fix, type-only classification made this LIDAR and
+    # multi_lidar falsely ELIGIBLE on a bag with one real lidar and one radar.
+    specs = [
+        pointcloud2_spec("/radar/points", i * LIDAR_DT_NS, RADAR_FIELD_LAYOUTS["bare_xyz"], n_points=25)
+        for i in range(20)
+    ]
+    specs += [
+        pointcloud2_spec("/velodyne_points", i * LIDAR_DT_NS, VENDOR_FIELD_LAYOUTS["velodyne"])
+        for i in range(20)
+    ]
+    path = write_mcap(tmp_path, specs)
+    report = run_checks(path, min_duration_s=0.0)
+
+    radar_topic = next(t for t in report.topics if t.topic == "/radar/points")
+    lidar_topic = next(t for t in report.topics if t.topic == "/velodyne_points")
+    assert radar_topic.role is TopicRole.RADAR
+    assert lidar_topic.role is TopicRole.LIDAR
+
+    assert CalibrationType.MULTI_LIDAR not in report.eligible_calibration_types
+    ineligible = {i.type: i.reason for i in report.ineligible_calibration_types}
+    assert "found 1" in ineligible[CalibrationType.MULTI_LIDAR]
+
+    radar_checks = [c for c in report.checks if c.id == "sensor_role_radar"]
+    assert len(radar_checks) == 1
+    assert radar_checks[0].status is CheckStatus.PASS
+    assert radar_checks[0].topic == "/radar/points"
+
+    # The radar topic must not also pick up lidar-specific field-schema noise.
+    assert not [c for c in report.checks if c.topic == "/radar/points" and c.id == "pointcloud_field_schema"]
+
+
+def test_radar_with_vendor_fields_classified_by_schema_not_density(tmp_path: Path) -> None:
+    # A radar publishing real vendor field names (smartmicro UMRR) is caught by the
+    # field-schema signal even at a high, lidar-like point count — schema is decisive.
+    specs = [
+        pointcloud2_spec(
+            "/mmwave/points", i * LIDAR_DT_NS, RADAR_FIELD_LAYOUTS["smartmicro"], n_points=12_000
+        )
+        for i in range(5)
+    ]
+    path = write_mcap(tmp_path, specs)
+    report = run_checks(path, min_duration_s=0.0)
+
+    radar_topic = next(t for t in report.topics if t.topic == "/mmwave/points")
+    assert radar_topic.role is TopicRole.RADAR
+
+
+def test_ambiguous_pointcloud_warns_and_is_excluded_from_lidar_coverage(tmp_path: Path) -> None:
+    # Schema silent (bare xyz, no ring), density in the inconclusive mid-range, and a
+    # topic name with no radar/lidar hint — must WARN, not silently pick a role, and
+    # must not count toward lidar coverage (the conservative default this fix exists
+    # to enforce).
+    specs = [
+        pointcloud2_spec("/sensor_3/points", i * LIDAR_DT_NS, RADAR_FIELD_LAYOUTS["bare_xyz"], n_points=5000)
+        for i in range(20)
+    ]
+    path = write_mcap(tmp_path, specs)
+    report = run_checks(path, calibration_type=CalibrationType.LIDAR_VEHICLE, min_duration_s=0.0)
+
+    topic = next(t for t in report.topics if t.topic == "/sensor_3/points")
+    assert topic.role is TopicRole.LIDAR_AMBIGUOUS
+
+    ambiguous_checks = [c for c in report.checks if c.id == "sensor_role_ambiguous"]
+    assert len(ambiguous_checks) == 1
+    assert ambiguous_checks[0].status is CheckStatus.WARN
+
+    assert CalibrationType.LIDAR_VEHICLE not in report.eligible_calibration_types
+
+
+def test_two_real_lidars_still_multi_lidar_eligible_control(tmp_path: Path) -> None:
+    # Control: two genuine lidars (different real vendor field layouts, both carry a
+    # ring field) must still classify as lidar and keep multi_lidar eligible — the
+    # radar/lidar discriminator must not regress the ordinary multi-lidar case.
+    specs = [
+        pointcloud2_spec("/lidar/front", i * LIDAR_DT_NS, VENDOR_FIELD_LAYOUTS["velodyne"])
+        for i in range(20)
+    ]
+    specs += [
+        pointcloud2_spec("/lidar/rear", i * LIDAR_DT_NS, VENDOR_FIELD_LAYOUTS["ouster"]) for i in range(20)
+    ]
+    path = write_mcap(tmp_path, specs)
+    report = run_checks(path, calibration_type=CalibrationType.MULTI_LIDAR, min_duration_s=0.0)
+
+    assert all(t.role is TopicRole.LIDAR for t in report.topics)
+    assert CalibrationType.MULTI_LIDAR in report.eligible_calibration_types
+    assert not [c for c in report.checks if c.id in ("sensor_role_radar", "sensor_role_ambiguous")]
+
+
 def test_json_report_round_trips_through_dict() -> None:
     # Smoke-check the JSON shape without needing a full bag — schema stability matters
     # since downstream consumers (scripts, CI, other services) rely on this exact shape.
@@ -192,7 +286,7 @@ def test_json_report_round_trips_through_dict() -> None:
     )
     encoded = json.dumps(report.to_dict())
     decoded = json.loads(encoded)
-    assert decoded["schema_version"] == "1.1"
+    assert decoded["schema_version"] == "1.2"
     assert decoded["status"] == "warnings"
     assert decoded["topics"][0]["role"] == "lidar"
     assert decoded["eligible_calibration_types"] == ["lidar_camera"]

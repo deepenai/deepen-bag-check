@@ -43,7 +43,7 @@ deepen-bag-check /path/to/ros2_bag_dir --json > report.json
 
 ```
 $ deepen-bag-check my_drive.mcap --for lidar-camera
-deepen-bag-check 1.0.0 — my_drive.mcap
+deepen-bag-check 1.0.1 — my_drive.mcap
 container: ros2_mcap
 status: WARNINGS (exit code 1)
 
@@ -95,6 +95,9 @@ Ineligible:
    `sensor_msgs/PointCloud2`, regardless of what the topic happens to be called.
    H.264/`ffmpeg_image_transport` camera topics are flagged separately, since they
    need a re-export before anything downstream can read them.
+   Automotive radar also publishes `sensor_msgs/PointCloud2` — see "Radar vs. lidar
+   discrimination" below for how a radar topic is told apart from a lidar one and
+   kept out of lidar coverage.
 4. **PointCloud2 field-schema check** — point cloud field names and types vary by
    lidar vendor. This tool normalizes the common variants (Velodyne, Ouster, Hesai,
    RoboSense) to canonical roles (`x`, `y`, `z`, `intensity`, `ring`, per-point `time`)
@@ -117,12 +120,12 @@ Ineligible:
 
 ## The JSON report
 
-`--json` prints a versioned report (`schema_version`, currently `"1.1"`):
+`--json` prints a versioned report (`schema_version`, currently `"1.2"`):
 
 ```json
 {
-  "schema_version": "1.1",
-  "bag_check_version": "1.0.0",
+  "schema_version": "1.2",
+  "bag_check_version": "1.0.1",
   "status": "warnings",
   "container_format": "ros2_mcap",
   "requested_calibration_type": "lidar_camera",
@@ -194,6 +197,31 @@ Some lidar drivers publish raw vendor UDP packets instead of `sensor_msgs/PointC
 
 Generic `sensor_msgs/PointCloud2` is still the preferred lane for every vendor,
 including Hesai — raw packets are a recognized fallback, not a replacement.
+
+## Radar vs. lidar discrimination
+
+Automotive/robotics radar publishes `sensor_msgs/PointCloud2` — the same message type
+as lidar — so type alone can't tell them apart. `deepen-bag-check` inspects a sample
+message's field schema and point density before finalizing a `PointCloud2` topic's role:
+
+| Role | Meaning | Counts toward lidar coverage? |
+|---|---|---|
+| `lidar` | A ring/channel field is present, or the point density is lidar-dense (>=10,000 points/message) with no radar-only fields. | Yes |
+| `radar` | A recognized radar-only field (`rcs`, `radial_speed`/`doppler_velocity`, `range_rate`, `snr`, `power`, `noise`, `amplitude`, `azimuth`/`azimuth_angle`, `elevation`/`elevation_angle`) is present with no ring field, or the point density is radar-sparse (<1,000 points/message) with no recognized field on either side. | **No** |
+| `lidar_ambiguous` | The schema and density signals disagree, or both are inconclusive (e.g. a mid-range point count with no distinguishing fields). Always paired with a `sensor_role_ambiguous` WARN naming the ambiguity. | **No** |
+
+Topic name (`radar`/`lidar`/vendor names) is consulted only as a last-resort
+tiebreaker, when schema and density are both silent — never as the primary signal,
+and never to override a real schema or density signal (topic classification is by
+message type, not name; this is the one narrow, documented exception, scoped
+identically to the `/tf` vs `/tf_static` exception above).
+
+This closes a real false positive found against the public Foxglove demo bag
+(`assets.foxglove.dev/demo.bag`): its `/radar/points` topic is a genuine radar
+(sibling `/radar/range` + `/radar/tracks` topics confirm it) publishing a bare
+`x,y,z` `PointCloud2` at ~20-30 points/message, alongside a real `/velodyne_points`
+lidar at ~40,000 points/message. Before this fix, both were classified `lidar` and
+`multi_lidar` was falsely reported eligible on a bag with exactly one real lidar.
 
 ## Known limitations
 

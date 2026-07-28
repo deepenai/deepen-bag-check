@@ -20,6 +20,14 @@ the one raw-packet vendor Deepen's calibration engine decodes natively (see
 classify.py). Other raw-packet vendors (Velodyne, Ouster) are recognized in the topic
 inventory but don't count toward coverage, since nothing in this pipeline can turn
 their packets into points yet (bagcheck/checks.py flags them with a WARN instead).
+
+v1.2 addendum (radar/lidar discrimination): `TopicRole.RADAR` and
+`TopicRole.LIDAR_AMBIGUOUS` topics — both reclassified from a tentative
+`sensor_msgs/PointCloud2` -> `TopicRole.LIDAR` by `classify.classify_pointcloud_role`
+(bagcheck/engine.py) once a sample message's field schema/density is inspected —
+never count toward `_count_lidar` below. This is deliberate, not an oversight: a
+radar publishing the same message type as lidar must not make `multi_lidar`
+(or any other type) falsely eligible.
 """
 
 from __future__ import annotations

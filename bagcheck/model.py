@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-SCHEMA_VERSION = "1.1"
-BAG_CHECK_VERSION = "1.0.0"
+SCHEMA_VERSION = "1.2"
+BAG_CHECK_VERSION = "1.0.1"
 
 
 class TopicRole(str, Enum):
@@ -18,6 +18,19 @@ class TopicRole(str, Enum):
     CAMERA_H264_UNSUPPORTED = "camera_h264_unsupported"
     LIDAR = "lidar"
     LIDAR_RAW = "lidar_raw"
+    # v1.2: a PointCloud2 topic whose field schema and/or point density confidently
+    # indicates a radar sensor, not a spinning/solid-state lidar (bagcheck/classify.py's
+    # `classify_pointcloud_role`). Radar and lidar share `sensor_msgs/PointCloud2` as
+    # their wire type, so this can only be decided after inspecting a sample message —
+    # never at connection-level classify_topic() time. Deliberately excluded from every
+    # lidar coverage count (bagcheck/coverage.py) so a bag with one lidar + one radar
+    # can't be misreported as `multi_lidar`-eligible.
+    RADAR = "radar"
+    # v1.2: a PointCloud2 topic bagcheck could decode but could not confidently place in
+    # either LIDAR or RADAR — the schema and density signals disagree, or neither fired.
+    # Conservative by design: excluded from lidar coverage (same as RADAR) rather than
+    # silently guessing, and always paired with a WARN check naming the ambiguity.
+    LIDAR_AMBIGUOUS = "lidar_ambiguous"
     IMU = "imu"
     CAMERA_INFO = "camera_info"
     TF = "tf"

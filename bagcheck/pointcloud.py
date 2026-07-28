@@ -16,6 +16,38 @@ ROS driver source, not guessed:
 Vendor *identification* (`vendor_signature`) is a nice-to-have for the report; the
 role mapping (x,y,z,intensity,ring,time) is what actually matters and is computed
 from the alias tables regardless of whether a vendor signature matches.
+
+`RADAR_ONLY_FIELD_NAMES` (v1.2, `classify.classify_pointcloud_role`): automotive/
+robotics radar drivers publish `sensor_msgs/PointCloud2` with the same wire type as
+lidar but a different field vocabulary — range/doppler/RCS-style returns instead of
+lidar's ring/per-point-time geometry. Field names below are verified against real
+driver source, not guessed:
+
+- smartmicro UMRR (`smartmicro/smartmicro_ros2_radars`, `umrr_ros2_driver/src/
+  smartmicro_radar_node.cpp`, `struct RadarPoint`) publishes `sensor_msgs/PointCloud2`
+  directly with fields `x, y, z, radial_speed, power, rcs, noise, snr, azimuth_angle,
+  elevation_angle, range` — the single strongest citation here, since it's the exact
+  wire-level PointCloud2 field list, not a custom message.
+- Delphi/Aptiv ESR (`astuff/astuff_sensor_msgs`, `delphi_esr_msgs/msg/EsrTrack.msg`):
+  `range_rate` (plus `range`, `angle`, `width`).
+- ROS 2's standard radar message package (`ros-perception/radar_msgs`, `msg/
+  RadarReturn.msg`): `range, azimuth, elevation, doppler_velocity, amplitude` — the
+  field vocabulary most PointCloud2-emitting radar converters mirror.
+- AinsteinAI (`AinsteinAI/ainstein_radar`, `ainstein_radar_msgs/msg/RadarTarget.msg`):
+  `target_id, snr, range, speed, azimuth, elevation`.
+- Continental ARS408 (`tier4/ars408_driver`, `src/ars408_driver.cpp`): CAN-decodes an
+  `rcs` field (`current_object.rcs = (in_can_data[7] * 0.5) - 64.0`).
+
+Two important asymmetries, confirmed against a real public bag (Foxglove's demo.bag,
+`/radar/points`, a genuine radar sibling of `/radar/range` + `/radar/tracks`): some
+radar-to-PointCloud2 converters strip every vendor field and publish bare `x,y,z` —
+zero overlap with `RADAR_ONLY_FIELD_NAMES` and zero overlap with lidar's `ring`. TI
+mmWave (`radar-lab/ti_mmwave_rospkg`, `src/DataHandlerClass.cpp`) does the same:
+`pcl::PointXYZI`, `intensity` populated from SNR, no `ring`. Field-schema matching
+alone cannot catch either case — that's why `classify_pointcloud_role` also weighs
+point density (radar returns are sparse; the real bag's `/radar/points` carries
+20-30 points/message against `/velodyne_points`' ~40,000) and never relies on a
+single signal.
 """
 
 from __future__ import annotations
@@ -28,6 +60,34 @@ RING_ALIASES: tuple[str, ...] = ("ring", "channel", "laser_id")
 TIME_ALIASES: tuple[str, ...] = ("time", "t", "timestamp", "time_stamp")
 
 REQUIRED_ROLES = ("x", "y", "z", "intensity", "ring")
+
+# PointCloud2 field names that indicate a radar return, not a lidar point (see this
+# module's docstring for per-name source citations). Every real driver checked this
+# session publishes at most a handful of these, never `ring`/`channel`/`laser_id` —
+# `classify.classify_pointcloud_role` treats ring-family presence as the stronger,
+# decisive lidar signal and only reaches for this set when ring is absent.
+RADAR_ONLY_FIELD_NAMES: frozenset[str] = frozenset(
+    {
+        "rcs",  # Continental ARS408 (CAN decode); smartmicro UMRR PointCloud2
+        "radial_speed",  # smartmicro UMRR PointCloud2 (direct field name)
+        "doppler_velocity",  # ros-perception/radar_msgs RadarReturn.msg (ROS 2 standard)
+        "doppler",  # common alias for the same quantity — not independently verified
+        # against a PointCloud2 wire format this session, included per the ROS radar
+        # driver convention doppler_velocity/radial_speed both shorten to.
+        "range_rate",  # Delphi/Aptiv ESR (delphi_esr_msgs/msg/EsrTrack.msg)
+        "snr",  # smartmicro UMRR PointCloud2; TI mmWave (intensity derived from SNR);
+        # Ainstein RadarTarget.msg
+        "power",  # smartmicro UMRR PointCloud2 (direct field name)
+        "noise",  # smartmicro UMRR PointCloud2 (direct field name)
+        "amplitude",  # ros-perception/radar_msgs RadarReturn.msg
+        "azimuth_angle",  # smartmicro UMRR PointCloud2 (direct field name)
+        "elevation_angle",  # smartmicro UMRR PointCloud2 (direct field name)
+        "azimuth",  # Ainstein RadarTarget.msg; ros-perception/radar_msgs RadarReturn.msg
+        "elevation",  # Ainstein RadarTarget.msg; ros-perception/radar_msgs RadarReturn.msg
+        "speed",  # Ainstein RadarTarget.msg — generic enough to be a weaker signal on
+        # its own, only ever consulted alongside the rest of this set, never alone.
+    }
+)
 
 
 @dataclass(frozen=True)

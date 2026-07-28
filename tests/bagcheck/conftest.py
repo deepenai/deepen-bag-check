@@ -128,6 +128,25 @@ VENDOR_FIELD_LAYOUTS: dict[str, list[tuple[str, int]]] = {
     "robosense": [("x", FLOAT32), ("y", FLOAT32), ("z", FLOAT32), ("intensity", UINT8), ("ring", UINT16), ("timestamp", FLOAT64)],
 }
 
+# Radar PointCloud2 field layouts (bagcheck/pointcloud.py's docstring has full source
+# citations for every name used here). "smartmicro" is a real automotive radar
+# driver's direct wire-level PointCloud2 field list (schema-decisive case). "bare_xyz"
+# matches the real public Foxglove demo bag's `/radar/points` topic — x,y,z only, no
+# vendor fields at all — the case that motivated the point-density signal, since field
+# names alone can't catch it.
+RADAR_FIELD_LAYOUTS: dict[str, list[tuple[str, int]]] = {
+    "smartmicro": [
+        ("x", FLOAT32),
+        ("y", FLOAT32),
+        ("z", FLOAT32),
+        ("radial_speed", FLOAT32),
+        ("power", FLOAT32),
+        ("rcs", FLOAT32),
+        ("snr", FLOAT32),
+    ],
+    "bare_xyz": [("x", FLOAT32), ("y", FLOAT32), ("z", FLOAT32)],
+}
+
 
 def pointcloud2_spec(
     topic: str,
