@@ -105,6 +105,21 @@ VENDOR_SIGNATURES: tuple[VendorSignature, ...] = (
     VendorSignature("robosense", intensity_dtype="UINT8", time_field="timestamp", time_dtype="FLOAT64"),
 )
 
+# Tie-break order used only when a real recording's per-point time field is entirely
+# absent (see `_match_vendor_signature`) and intensity dtype alone leaves more than one
+# vendor standing. Velodyne is listed first: its ROS1 `velodyne_pointcloud` driver is
+# the one most commonly seen, in real recordings, publishing `PointXYZIR` (x,y,z,
+# intensity,ring) with no per-point time at all — this is the exact shape of the real
+# `/velodyne_points` topic in Foxglove's public `demo.bag` (verified live: `point_step`
+# 32, fields `x@0,y@4,z@8,intensity@16,ring@20` — a PCL/Eigen 16-byte alignment gap
+# between `z` and `intensity` where a `time` field would otherwise sit, not a name or
+# dtype difference). Ouster and Hesai are listed after; their own driver sources
+# (docstring above) don't rule out a similarly time-stripped recording, so this is a
+# documented default, not a claim of certainty — `vendor_signature` has always been a
+# cosmetic, best-effort label (see this module's docstring), never load-bearing for the
+# coverage/role mapping above it.
+_NO_TIME_FALLBACK_PRIORITY: tuple[str, ...] = ("velodyne", "ouster", "hesai", "robosense")
+
 # sensor_msgs/PointField datatype constants (ROS1 and ROS2 agree on these values).
 POINTFIELD_DATATYPE_NAMES: dict[int, str] = {
     1: "INT8",
@@ -172,15 +187,39 @@ def normalize_fields(field_dtypes: dict[str, str]) -> FieldRoleMap:
 
 
 def _match_vendor_signature(field_dtypes: dict[str, str], roles: FieldRoleMap) -> str | None:
-    if not (roles.intensity and roles.time):
+    """Identify the lidar vendor from field NAMES + PointField datatypes alone — never
+    from byte offsets or `point_step`. Real-world recordings routinely carry PCL/Eigen
+    memory-alignment padding (a byte gap between two declared fields' offsets) and/or
+    have their per-point time field dropped entirely by the driver or a bag-conversion
+    step; neither should defeat fingerprinting, since both just mean "some bytes aren't
+    a named field", not "the named fields present mean something different".
+
+    `ring` is required (every vendor above declares one) so this never fires on a bare
+    x,y,z,intensity cloud that happens to share an intensity dtype with a real vendor.
+    """
+    if not (roles.intensity and roles.ring):
         return None
     intensity_dtype = field_dtypes.get(roles.intensity)
-    time_dtype = field_dtypes.get(roles.time)
-    for sig in VENDOR_SIGNATURES:
-        if (
-            sig.time_field == roles.time
-            and sig.intensity_dtype == intensity_dtype
-            and sig.time_dtype == time_dtype
-        ):
-            return sig.name
+    candidates = [sig for sig in VENDOR_SIGNATURES if sig.intensity_dtype == intensity_dtype]
+    if not candidates:
+        return None
+
+    if roles.time:
+        # Per-point time is present and decoded — the strong, unambiguous signal.
+        # Unchanged from prior behavior: a time field that matches no candidate's
+        # (name, dtype) pair is "unrecognized", not a guess.
+        time_dtype = field_dtypes.get(roles.time)
+        for sig in candidates:
+            if sig.time_field == roles.time and sig.time_dtype == time_dtype:
+                return sig.name
+        return None
+
+    # No per-point time field at all. If intensity dtype alone already narrowed to one
+    # vendor (RoboSense's UINT8 is unique among the four researched), that's still a
+    # confident match. Otherwise (Velodyne/Ouster/Hesai all use FLOAT32 intensity),
+    # fall back to the documented priority order above rather than leaving a real,
+    # well-formed vendor cloud unrecognized just because its time field was stripped.
+    for name in _NO_TIME_FALLBACK_PRIORITY:
+        if any(sig.name == name for sig in candidates):
+            return name
     return None

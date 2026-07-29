@@ -43,7 +43,7 @@ deepen-bag-check /path/to/ros2_bag_dir --json > report.json
 
 ```
 $ deepen-bag-check my_drive.mcap --for lidar-camera
-deepen-bag-check 1.0.1 — my_drive.mcap
+deepen-bag-check 1.0.2 — my_drive.mcap
 container: ros2_mcap
 status: WARNINGS (exit code 1)
 
@@ -125,7 +125,7 @@ Ineligible:
 ```json
 {
   "schema_version": "1.2",
-  "bag_check_version": "1.0.1",
+  "bag_check_version": "1.0.2",
   "status": "warnings",
   "container_format": "ros2_mcap",
   "requested_calibration_type": "lidar_camera",
@@ -183,6 +183,19 @@ schemas (dtype taken from each vendor's own ROS driver source):
 
 `ring` is also recognized under the aliases `channel` and `laser_id`; per-point time
 is also recognized under `time_stamp`.
+
+Vendor identification tolerates a missing per-point time field — real recordings
+sometimes don't publish one (stripped by the driver, or by PCL/Eigen memory-alignment
+padding consuming the bytes a time field would otherwise occupy). When intensity dtype
+alone already narrows it to one vendor (RoboSense's `uint8` is unique here), that's
+still a confident match; otherwise (Velodyne/Ouster/Hesai all use `float32` intensity)
+it falls back to Velodyne, the vendor most commonly seen in real recordings publishing
+without per-point time — this is cosmetic only (`vendor_signature` in the report), and
+never affects the field-role mapping (`x`, `y`, `z`, `intensity`, `ring`, `time`)
+itself. Verified against a real public bag: `assets.foxglove.dev/demo.bag`'s
+`/velodyne_points` (`point_step=32`, fields `x@0,y@4,z@8,intensity@16,ring@20` — a
+4-byte alignment gap where `time` would sit, and no `time` field published at all) is
+correctly identified as `vendor=velodyne`.
 
 ## Vendor raw-packet lidar lanes
 
@@ -256,6 +269,16 @@ uv run ruff check .
 
 Tests build small synthetic bags/mcap files on the fly (see `tests/bagcheck/conftest.py`)
 — no committed fixtures, no network access required. See `CONTRIBUTING.md` for more.
+
+### Source of truth
+
+`bagcheck/` in this repo is a published copy, kept in sync from Deepen's internal
+`deepen-automate` repo, which is the **source of truth** for this code. If you're
+looking at a bug in `bagcheck/` here, the fix needs to land in `deepen-automate` first
+and then be ported over — see that repo's `bagcheck/README.md`, "Keeping the standalone
+copy in sync", for the procedure and the CI check (`scripts/check_bagcheck_sync.py`)
+that enforces it. Contributions/PRs to this repo are still very welcome — see
+`CONTRIBUTING.md`.
 
 ## Hosted calibration
 

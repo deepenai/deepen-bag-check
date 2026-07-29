@@ -2,6 +2,11 @@
 
 Thanks for considering a contribution to `deepen-bag-check`.
 
+`bagcheck/`'s source of truth is Deepen's internal `deepen-automate` repo — bug fixes
+and behavioral changes made here get ported back there too (or land there first). See
+that repo's `bagcheck/README.md`, "Keeping the standalone copy in sync", if you're
+curious how; it doesn't change how you should open a PR here.
+
 ## Development setup
 
 ```

@@ -197,6 +197,61 @@ def pointcloud2_spec(
     return MessageSpec(topic, PointCloud2.__msgtype__, ts_ns, obj, mcap_dict)
 
 
+def padded_pointcloud2_spec(
+    topic: str,
+    ts_ns: int,
+    fields: list[tuple[str, int, int]],
+    point_step: int,
+    n_points: int = 5,
+    frame_id: str = "lidar_link",
+) -> MessageSpec:
+    """Like `pointcloud2_spec`, but with an explicit `point_step` and per-field byte
+    `offset` (`fields` is `(name, PointField-datatype, offset)`) instead of tight
+    packing — reproduces PCL/Eigen memory-alignment padding (an unclaimed byte gap
+    between two fields' declared offsets), the way a real vendor driver's struct-based
+    PointCloud2 publisher does. Every declared field is still fully self-describing
+    (name + offset + datatype in the PointField list itself, exactly like the real wire
+    format); padding bytes are simply zero-filled and claimed by no field."""
+    np_dtype = np.dtype(
+        {
+            "names": [name for name, _, _ in fields],
+            "formats": [_NUMPY_DTYPE_BY_PF[dt] for _, dt, _ in fields],
+            "offsets": [offset for _, _, offset in fields],
+            "itemsize": point_step,
+        }
+    )
+    points = np.zeros(n_points, dtype=np_dtype)
+    if "x" in np_dtype.names:
+        points["x"] = np.arange(n_points, dtype=np_dtype["x"])
+    data = points.tobytes()
+
+    pf_fields = [PointField(name=name, offset=offset, datatype=dt, count=1) for name, dt, offset in fields]
+
+    obj = PointCloud2(
+        header=_header(ts_ns, frame_id),
+        height=1,
+        width=n_points,
+        fields=pf_fields,
+        is_bigendian=False,
+        point_step=point_step,
+        row_step=point_step * n_points,
+        data=np.frombuffer(data, dtype=np.uint8),
+        is_dense=True,
+    )
+    mcap_dict = {
+        "header": _header_dict(ts_ns, frame_id),
+        "height": 1,
+        "width": n_points,
+        "fields": [{"name": n, "offset": o, "datatype": dt, "count": 1} for n, dt, o in fields],
+        "is_bigendian": False,
+        "point_step": point_step,
+        "row_step": point_step * n_points,
+        "data": list(data),
+        "is_dense": True,
+    }
+    return MessageSpec(topic, PointCloud2.__msgtype__, ts_ns, obj, mcap_dict)
+
+
 def camera_info_spec(topic: str, ts_ns: int, k: list[float], frame_id: str = "cam_link") -> MessageSpec:
     obj = CameraInfo(
         header=_header(ts_ns, frame_id),

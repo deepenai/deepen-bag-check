@@ -1,6 +1,6 @@
 [project]
 name = "deepen-bag-check"
-version = "1.0.1"
+version = "1.0.2"
 description = "Validate a rosbag before submitting it for multi-sensor calibration — no ROS install required."
 readme = "README.md"
 license = "Apache-2.0"

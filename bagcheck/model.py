@@ -9,7 +9,7 @@ from enum import Enum
 from typing import Any
 
 SCHEMA_VERSION = "1.2"
-BAG_CHECK_VERSION = "1.0.1"
+BAG_CHECK_VERSION = "1.0.2"
 
 
 class TopicRole(str, Enum):

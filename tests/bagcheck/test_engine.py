@@ -15,11 +15,14 @@ from bagcheck.model import (
     ValidationReport,
 )
 from tests.bagcheck.conftest import (
+    FLOAT32,
     RADAR_FIELD_LAYOUTS,
+    UINT16,
     VENDOR_FIELD_LAYOUTS,
     camera_info_spec,
     compressed_image_spec,
     imu_spec,
+    padded_pointcloud2_spec,
     pointcloud2_spec,
     tf_static_spec,
     write_bare_db3,
@@ -78,6 +81,56 @@ def test_well_formed_bag_passes_on_every_container(tmp_path: Path, writer) -> No
     lidar_topic = next(t for t in report.topics if t.role.value == "lidar")
     assert lidar_topic.vendor_signature == "hesai"
     assert lidar_topic.has_per_point_time
+
+
+def test_velodyne_vendor_signature_recognized_despite_pcl_alignment_padding(tmp_path: Path) -> None:
+    """Regression: a real Velodyne recording (Foxglove's public `demo.bag`,
+    `/velodyne_points`) has a 4-byte PCL/Eigen alignment gap between `z` and
+    `intensity` and publishes no per-point `time` field at all — verified live
+    against that bag: `point_step=32`, fields `x@0,y@4,z@8,intensity@16,ring@20`. This
+    fixture reproduces that exact byte layout synthetically so the regression is caught
+    without a network fetch."""
+    padded_velodyne_layout = [
+        ("x", FLOAT32, 0),
+        ("y", FLOAT32, 4),
+        ("z", FLOAT32, 8),
+        ("intensity", FLOAT32, 16),
+        ("ring", UINT16, 20),
+    ]
+    specs = [
+        padded_pointcloud2_spec("/velodyne_points", i * LIDAR_DT_NS, padded_velodyne_layout, point_step=32)
+        for i in range(5)
+    ]
+    report = run_checks(write_mcap(tmp_path, specs), min_duration_s=0.0)
+
+    lidar_topic = next(t for t in report.topics if t.role.value == "lidar")
+    assert lidar_topic.vendor_signature == "velodyne"
+    assert not lidar_topic.has_per_point_time
+
+
+def test_velodyne_vendor_signature_recognized_unpadded_control(tmp_path: Path) -> None:
+    """Control for the padding-tolerance fix above: Velodyne's full, tight-packed
+    layout (including its optional `time` field) must still resolve to "velodyne" —
+    confirms the fix left the common, non-degraded case unchanged."""
+    specs = [
+        pointcloud2_spec("/velodyne_points", i * LIDAR_DT_NS, VENDOR_FIELD_LAYOUTS["velodyne"]) for i in range(5)
+    ]
+    report = run_checks(write_mcap(tmp_path, specs), min_duration_s=0.0)
+
+    lidar_topic = next(t for t in report.topics if t.role.value == "lidar")
+    assert lidar_topic.vendor_signature == "velodyne"
+    assert lidar_topic.has_per_point_time
+
+
+def test_ouster_vendor_signature_not_collided_with_velodyne_fallback(tmp_path: Path) -> None:
+    """Collision guard: Ouster and Velodyne both use FLOAT32 intensity — exactly the
+    pair the no-time fallback (above) could conflate. Ouster's real time field ('t',
+    UINT32) must still win and must NOT be reported as "velodyne"."""
+    specs = [pointcloud2_spec("/lidar/points", i * LIDAR_DT_NS, VENDOR_FIELD_LAYOUTS["ouster"]) for i in range(5)]
+    report = run_checks(write_mcap(tmp_path, specs), min_duration_s=0.0)
+
+    lidar_topic = next(t for t in report.topics if t.role.value == "lidar")
+    assert lidar_topic.vendor_signature == "ouster"
 
 
 def test_missing_camera_info_produces_warning_status(tmp_path: Path) -> None:
