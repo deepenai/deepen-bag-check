@@ -27,9 +27,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/deepenai/deepen-bag-check"
-Repository = "https://github.com/deepenai/deepen-bag-check"
-Issues = "https://github.com/deepenai/deepen-bag-check/issues"
+Homepage = "https://github.com/mmusa/deepen-bag-check"
+Repository = "https://github.com/mmusa/deepen-bag-check"
+Issues = "https://github.com/mmusa/deepen-bag-check/issues"
 
 [project.scripts]
 deepen-bag-check = "bagcheck.cli:main"
