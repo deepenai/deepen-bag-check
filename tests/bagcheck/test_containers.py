@@ -52,6 +52,16 @@ def test_rejects_corrupt_file(tmp_path: Path) -> None:
         detect_container(junk)
 
 
+def test_rejects_empty_file_with_its_own_message(tmp_path: Path) -> None:
+    """B7: a 0-byte file and a corrupt-but-nonempty file must not read as the same
+    problem — "empty" and "not a recognizable container" call for different fixes."""
+    empty = tmp_path / "empty.bag"
+    empty.write_bytes(b"")
+    with pytest.raises(UnsupportedContainerError, match="file is empty") as excinfo:
+        detect_container(empty)
+    assert "unrecognized container" not in str(excinfo.value)
+
+
 def test_rejects_directory_without_metadata(tmp_path: Path) -> None:
     empty_dir = tmp_path / "not_a_bag"
     empty_dir.mkdir()

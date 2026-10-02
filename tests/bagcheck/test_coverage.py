@@ -74,3 +74,12 @@ def test_non_hesai_raw_lidar_does_not_count_toward_coverage() -> None:
     ]
     result = check_coverage(two_velodyne_raw, CalibrationType.MULTI_LIDAR)
     assert not result.eligible
+
+
+def test_robosense_raw_lidar_does_not_count_toward_coverage() -> None:
+    # Recognized like Velodyne/Ouster raw packets, but nothing in the pipeline decodes them.
+    two_robosense_raw = [
+        _topic(TopicRole.LIDAR_RAW, "/lidar1", vendor_signature="robosense"),
+        _topic(TopicRole.LIDAR_RAW, "/lidar2", vendor_signature="robosense"),
+    ]
+    assert not check_coverage(two_robosense_raw, CalibrationType.MULTI_LIDAR).eligible

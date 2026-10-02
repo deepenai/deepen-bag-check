@@ -17,9 +17,10 @@ wheels = [
 
 [[package]]
 name = "deepen-bag-check"
-version = "1.0.2"
+version = "1.2.0"
 source = { editable = "." }
 dependencies = [
+    { name = "lz4" },
     { name = "mcap" },
     { name = "mcap-ros2-support" },
     { name = "pyyaml" },
@@ -36,6 +37,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "lz4", specifier = ">=4.4" },
     { name = "mcap", specifier = "==1.4.0" },
     { name = "mcap-ros2-support", specifier = "==0.5.7" },
     { name = "pyyaml", specifier = ">=6.0" },

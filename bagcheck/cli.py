@@ -9,7 +9,12 @@ import argparse
 import json
 import sys
 
-from bagcheck.checks import DEFAULT_MIN_DURATION_S
+from bagcheck.checks import (
+    DEFAULT_MIN_DURATION_S,
+    RECOMMENDED_DURATION_S,
+    SPARSE_LIDAR_MAX_BEAMS,
+    SPARSE_LIDAR_RECOMMENDED_DURATION_S,
+)
 from bagcheck.containers import BagCheckError
 from bagcheck.engine import run_checks
 from bagcheck.model import BAG_CHECK_VERSION, CalibrationType
@@ -41,7 +46,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--min-duration-s",
         type=float,
         default=DEFAULT_MIN_DURATION_S,
-        help=f"Minimum bag duration to pass (default: {DEFAULT_MIN_DURATION_S}s).",
+        help=(
+            f"Hard minimum bag duration; shorter bags fail (default: {DEFAULT_MIN_DURATION_S:.0f}s). "
+            f"Bags shorter than the recommended {RECOMMENDED_DURATION_S:.0f}s "
+            f"({SPARSE_LIDAR_RECOMMENDED_DURATION_S:.0f}s when every lidar has {SPARSE_LIDAR_MAX_BEAMS} "
+            "beams or fewer) get a warning."
+        ),
     )
     parser.add_argument("--version", action="version", version=f"deepen-bag-check {BAG_CHECK_VERSION}")
     return parser

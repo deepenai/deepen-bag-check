@@ -60,6 +60,7 @@ def _to_ros1(obj: Any) -> Any:
         kwargs["seq"] = 0
     return cls(**kwargs)
 
+
 Header = TS.types["std_msgs/msg/Header"]
 Time = TS.types["builtin_interfaces/msg/Time"]
 Imu = TS.types["sensor_msgs/msg/Imu"]
@@ -122,10 +123,39 @@ def imu_spec(topic: str, ts_ns: int, frame_id: str = "imu_link", wz: float = 0.0
 # Per-vendor PointCloud2 field layouts, dtypes confirmed against each vendor's own ROS
 # driver source (see bagcheck/pointcloud.py docstring for citations).
 VENDOR_FIELD_LAYOUTS: dict[str, list[tuple[str, int]]] = {
-    "velodyne": [("x", FLOAT32), ("y", FLOAT32), ("z", FLOAT32), ("intensity", FLOAT32), ("ring", UINT16), ("time", FLOAT32)],
-    "ouster": [("x", FLOAT32), ("y", FLOAT32), ("z", FLOAT32), ("intensity", FLOAT32), ("t", UINT32), ("reflectivity", UINT16), ("ring", UINT16)],
-    "hesai": [("x", FLOAT32), ("y", FLOAT32), ("z", FLOAT32), ("intensity", FLOAT32), ("ring", UINT16), ("timestamp", FLOAT64)],
-    "robosense": [("x", FLOAT32), ("y", FLOAT32), ("z", FLOAT32), ("intensity", UINT8), ("ring", UINT16), ("timestamp", FLOAT64)],
+    "velodyne": [
+        ("x", FLOAT32),
+        ("y", FLOAT32),
+        ("z", FLOAT32),
+        ("intensity", FLOAT32),
+        ("ring", UINT16),
+        ("time", FLOAT32),
+    ],
+    "ouster": [
+        ("x", FLOAT32),
+        ("y", FLOAT32),
+        ("z", FLOAT32),
+        ("intensity", FLOAT32),
+        ("t", UINT32),
+        ("reflectivity", UINT16),
+        ("ring", UINT16),
+    ],
+    "hesai": [
+        ("x", FLOAT32),
+        ("y", FLOAT32),
+        ("z", FLOAT32),
+        ("intensity", FLOAT32),
+        ("ring", UINT16),
+        ("timestamp", FLOAT64),
+    ],
+    "robosense": [
+        ("x", FLOAT32),
+        ("y", FLOAT32),
+        ("z", FLOAT32),
+        ("intensity", UINT8),
+        ("ring", UINT16),
+        ("timestamp", FLOAT64),
+    ],
 }
 
 # Radar PointCloud2 field layouts (bagcheck/pointcloud.py's docstring has full source
@@ -154,14 +184,21 @@ def pointcloud2_spec(
     field_layout: list[tuple[str, int]],
     n_points: int = 5,
     frame_id: str = "lidar_link",
+    x_offset: float = 0.0,
+    ring_count: int | None = None,
 ) -> MessageSpec:
     """Build a PointCloud2 with an arbitrary (name, PointField-datatype) field layout,
     tightly packed in the order given — this is how `normalize_fields()` is exercised
-    against each vendor's real field names/dtypes."""
+    against each vendor's real field names/dtypes. `x_offset` shifts every point's x —
+    varying it across scans simulates rig translation (scene ranges drift), for the
+    translation_excitation check. `ring_count` fills the `ring` field with 0..ring_count-1
+    (otherwise it stays zero), for the beam-count-dependent duration rule."""
     np_dtype = np.dtype([(name, _NUMPY_DTYPE_BY_PF[dt]) for name, dt in field_layout])
     points = np.zeros(n_points, dtype=np_dtype)
     if "x" in np_dtype.names:
-        points["x"] = np.arange(n_points, dtype=np_dtype["x"])
+        points["x"] = np.arange(n_points, dtype=np_dtype["x"]) + np_dtype["x"].type(x_offset)
+    if ring_count is not None and "ring" in np_dtype.names:
+        points["ring"] = np.arange(n_points) % ring_count
     data = points.tobytes()
 
     fields = []
@@ -185,9 +222,10 @@ def pointcloud2_spec(
         "header": _header_dict(ts_ns, frame_id),
         "height": 1,
         "width": n_points,
-        "fields": [{"name": n, "offset": o.offset, "datatype": o.datatype, "count": 1} for n, o in zip(
-            [f[0] for f in field_layout], fields, strict=True
-        )],
+        "fields": [
+            {"name": n, "offset": o.offset, "datatype": o.datatype, "count": 1}
+            for n, o in zip([f[0] for f in field_layout], fields, strict=True)
+        ],
         "is_bigendian": False,
         "point_step": np_dtype.itemsize,
         "row_step": np_dtype.itemsize * n_points,
@@ -225,7 +263,9 @@ def padded_pointcloud2_spec(
         points["x"] = np.arange(n_points, dtype=np_dtype["x"])
     data = points.tobytes()
 
-    pf_fields = [PointField(name=name, offset=offset, datatype=dt, count=1) for name, dt, offset in fields]
+    pf_fields = [
+        PointField(name=name, offset=offset, datatype=dt, count=1) for name, dt, offset in fields
+    ]
 
     obj = PointCloud2(
         header=_header(ts_ns, frame_id),
@@ -252,7 +292,9 @@ def padded_pointcloud2_spec(
     return MessageSpec(topic, PointCloud2.__msgtype__, ts_ns, obj, mcap_dict)
 
 
-def camera_info_spec(topic: str, ts_ns: int, k: list[float], frame_id: str = "cam_link") -> MessageSpec:
+def camera_info_spec(
+    topic: str, ts_ns: int, k: list[float], frame_id: str = "cam_link"
+) -> MessageSpec:
     obj = CameraInfo(
         header=_header(ts_ns, frame_id),
         height=480,
@@ -282,49 +324,98 @@ def camera_info_spec(topic: str, ts_ns: int, k: list[float], frame_id: str = "ca
     return MessageSpec(topic, CameraInfo.__msgtype__, ts_ns, obj, mcap_dict)
 
 
-def compressed_image_spec(topic: str, ts_ns: int, fmt: str = "jpeg", frame_id: str = "cam_link") -> MessageSpec:
+def compressed_image_spec(
+    topic: str, ts_ns: int, fmt: str = "jpeg", frame_id: str = "cam_link"
+) -> MessageSpec:
     payload = b"\xff\xd8\xff\xd9"  # minimal (fake) JPEG-ish payload, content is never decoded
-    obj = CompressedImage(header=_header(ts_ns, frame_id), format=fmt, data=np.frombuffer(payload, dtype=np.uint8))
+    obj = CompressedImage(
+        header=_header(ts_ns, frame_id), format=fmt, data=np.frombuffer(payload, dtype=np.uint8)
+    )
     mcap_dict = {"header": _header_dict(ts_ns, frame_id), "format": fmt, "data": list(payload)}
     return MessageSpec(topic, CompressedImage.__msgtype__, ts_ns, obj, mcap_dict)
 
 
-def image_spec(topic: str, ts_ns: int, encoding: str = "bgr8", frame_id: str = "cam_link") -> MessageSpec:
+def image_spec(
+    topic: str, ts_ns: int, encoding: str = "bgr8", frame_id: str = "cam_link"
+) -> MessageSpec:
     payload = bytes(12)
-    obj = Image(header=_header(ts_ns, frame_id), height=1, width=4, encoding=encoding, is_bigendian=0, step=12, data=np.frombuffer(payload, dtype=np.uint8))
-    mcap_dict = {"header": _header_dict(ts_ns, frame_id), "height": 1, "width": 4, "encoding": encoding, "is_bigendian": 0, "step": 12, "data": list(payload)}
+    obj = Image(
+        header=_header(ts_ns, frame_id),
+        height=1,
+        width=4,
+        encoding=encoding,
+        is_bigendian=0,
+        step=12,
+        data=np.frombuffer(payload, dtype=np.uint8),
+    )
+    mcap_dict = {
+        "header": _header_dict(ts_ns, frame_id),
+        "height": 1,
+        "width": 4,
+        "encoding": encoding,
+        "is_bigendian": 0,
+        "step": 12,
+        "data": list(payload),
+    }
     return MessageSpec(topic, Image.__msgtype__, ts_ns, obj, mcap_dict)
 
 
 def tf_static_spec(topic: str, ts_ns: int, parent: str, child: str) -> MessageSpec:
-    transform = Transform(translation=Vector3(x=0.0, y=0.0, z=0.0), rotation=Quaternion(x=0.0, y=0.0, z=0.0, w=1.0))
-    obj = TFMessage(transforms=[TransformStamped(header=_header(ts_ns, parent), child_frame_id=child, transform=transform)])
+    transform = Transform(
+        translation=Vector3(x=0.0, y=0.0, z=0.0), rotation=Quaternion(x=0.0, y=0.0, z=0.0, w=1.0)
+    )
+    obj = TFMessage(
+        transforms=[
+            TransformStamped(
+                header=_header(ts_ns, parent), child_frame_id=child, transform=transform
+            )
+        ]
+    )
     mcap_dict = {
         "transforms": [
             {
                 "header": _header_dict(ts_ns, parent),
                 "child_frame_id": child,
-                "transform": {"translation": {"x": 0.0, "y": 0.0, "z": 0.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}},
+                "transform": {
+                    "translation": {"x": 0.0, "y": 0.0, "z": 0.0},
+                    "rotation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+                },
             }
         ]
     }
     return MessageSpec(topic, TFMessage.__msgtype__, ts_ns, obj, mcap_dict)
 
 
-def write_ros1_bag(tmp_path: Path, specs: list[MessageSpec], name: str = "bag.bag") -> Path:
+def write_ros1_bag(
+    tmp_path: Path, specs: list[MessageSpec], name: str = "bag.bag", compression: str | None = None
+) -> Path:
+    """`compression`: `None` (default, uncompressed), `"bz2"`, or `"lz4"` — exercises
+    `bagcheck.checks.check_ros1_chunk_compression`. Must be set before the writer opens
+    (`rosbags.rosbag1.Writer.set_compression`'s own restriction)."""
     path = tmp_path / name
-    with Ros1Writer(path) as writer:
+    writer = Ros1Writer(path)
+    if compression is not None:
+        writer.set_compression(Ros1Writer.CompressionFormat[compression.upper()])
+    with writer:
         connections = {}
         for spec in specs:
             if spec.topic not in connections:
-                connections[spec.topic] = writer.add_connection(spec.topic, spec.msgtype, typestore=TS1_ROS1)
+                connections[spec.topic] = writer.add_connection(
+                    spec.topic, spec.msgtype, typestore=TS1_ROS1
+                )
             conn = connections[spec.topic]
-            raw = TS1_ROS1.serialize_ros1(_to_ros1(spec.obj), spec.msgtype) if spec.obj is not None else b"\x00"
+            raw = (
+                TS1_ROS1.serialize_ros1(_to_ros1(spec.obj), spec.msgtype)
+                if spec.obj is not None
+                else b"\x00"
+            )
             writer.write(conn, spec.timestamp_ns, bytes(raw))
     return path
 
 
-def write_custom_type_ros1_bag(tmp_path: Path, topic: str, msgtype: str, name: str = "bag.bag") -> Path:
+def write_custom_type_ros1_bag(
+    tmp_path: Path, topic: str, msgtype: str, name: str = "bag.bag"
+) -> Path:
     """A minimal bag with one connection of a message type unknown to any typestore —
     exercises schema/custom-type flagging. `rosbags` requires the
     3-part `pkg/msg/Msg` spelling on write even for a ROS1 bag; `bagcheck.classify`
@@ -337,15 +428,20 @@ def write_unknown_type_ros1_bag(
     topic_msgtypes: dict[str, str],
     extra_specs: list[MessageSpec] | None = None,
     name: str = "bag.bag",
+    compression: str | None = None,
 ) -> Path:
     """A bag with one or more connections of a message type unknown to any typestore —
     e.g. real vendor raw-packet lidar types like `pandar_msgs/PandarScan`, which no
     typestore decodes — plus optional normal (`MessageSpec`-built) topics like IMU.
     Exercises schema/custom-type flagging and, for recognized raw-packet lidar types,
     the `TopicRole.LIDAR_RAW` classification and coverage path, all without needing a
-    real vendor SDK to decode anything."""
+    real vendor SDK to decode anything. `compression`: see
+    `write_ros1_bag`."""
     path = tmp_path / name
-    with Ros1Writer(path) as writer:
+    writer = Ros1Writer(path)
+    if compression is not None:
+        writer.set_compression(Ros1Writer.CompressionFormat[compression.upper()])
+    with writer:
         for topic, msgtype in topic_msgtypes.items():
             pkg, _, name_part = msgtype.partition("/")
             three_part = f"{pkg}/msg/{name_part}"
@@ -354,7 +450,9 @@ def write_unknown_type_ros1_bag(
         connections: dict[str, Any] = {}
         for spec in extra_specs or []:
             if spec.topic not in connections:
-                connections[spec.topic] = writer.add_connection(spec.topic, spec.msgtype, typestore=TS1_ROS1)
+                connections[spec.topic] = writer.add_connection(
+                    spec.topic, spec.msgtype, typestore=TS1_ROS1
+                )
             conn = connections[spec.topic]
             raw = TS1_ROS1.serialize_ros1(_to_ros1(spec.obj), spec.msgtype)
             writer.write(conn, spec.timestamp_ns, bytes(raw))
@@ -367,7 +465,9 @@ def write_ros2_bag_dir(tmp_path: Path, specs: list[MessageSpec], name: str = "ro
         connections = {}
         for spec in specs:
             if spec.topic not in connections:
-                connections[spec.topic] = writer.add_connection(spec.topic, spec.msgtype, typestore=TS)
+                connections[spec.topic] = writer.add_connection(
+                    spec.topic, spec.msgtype, typestore=TS
+                )
             conn = connections[spec.topic]
             raw = TS.serialize_cdr(spec.obj, spec.msgtype) if spec.obj is not None else b"\x00"
             writer.write(conn, spec.timestamp_ns, bytes(raw))
@@ -396,6 +496,8 @@ def write_mcap(tmp_path: Path, specs: list[MessageSpec], name: str = "bag.mcap")
             if spec.msgtype not in schemas:
                 msgdef, _ = TS.generate_msgdef(spec.msgtype, ros_version=2)
                 schemas[spec.msgtype] = writer.register_msgdef(spec.msgtype, msgdef)
-            writer.write_message(spec.topic, schemas[spec.msgtype], spec.mcap_dict, log_time=spec.timestamp_ns)
+            writer.write_message(
+                spec.topic, schemas[spec.msgtype], spec.mcap_dict, log_time=spec.timestamp_ns
+            )
         writer.finish()
     return path

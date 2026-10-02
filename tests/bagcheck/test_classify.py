@@ -155,3 +155,14 @@ def test_topic_name_never_overrides_a_real_density_signal() -> None:
         "/lidar_or_is_it/points", {"x", "y", "z"}, point_count=10
     )
     assert decision.role is TopicRole.RADAR
+
+
+def test_classifies_robosense_raw_packets_as_lidar_raw() -> None:
+    assert classify_topic("/rslidar_packets", "rslidar_msg/msg/RslidarPacket") is TopicRole.LIDAR_RAW
+    assert classify_topic("/rslidar_packets", "rslidar_msgs/rslidarScan") is TopicRole.LIDAR_RAW
+    assert classify_topic("/rslidar_packets", "rslidar_msgs/rslidarPacket") is TopicRole.LIDAR_RAW
+
+
+def test_raw_lidar_vendor_identifies_robosense() -> None:
+    assert raw_lidar_vendor("rslidar_msg/msg/RslidarPacket") == "robosense"
+    assert raw_lidar_vendor("rslidar_msgs/rslidarScan") == "robosense"

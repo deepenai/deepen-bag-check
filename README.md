@@ -1,8 +1,32 @@
-# deepen-bag-check
+# deepen-bag-check (Data Checker CLI)
 
-A pre-upload validator for rosbags used in sensor calibration. It reads your bag,
-tells you exactly what it found, and flags anything that would block a calibration
-run — in seconds, on your own machine, before you upload anything over any network.
+The Data Checker CLI is a pre-upload validator for rosbags used in sensor calibration.
+It reads your recording, tells you exactly what it found, and flags anything that would
+block a calibration run — before you upload anything, over any network. The package and
+command are named `deepen-bag-check`.
+
+## What it validates
+
+Exactly this, and nothing else:
+
+- **Containers:** ROS1 `.bag`, ROS2 `.db3` and ROS2 `.mcap` — each as a standalone file
+  or as a ROS2 bag directory with its `metadata.yaml`.
+- **Calibration types (`--for`):** lidar–camera, multi-lidar, lidar–vehicle and
+  lidar–IMU. For each it checks that the recording has the minimum sensor set; it does
+  not check camera intrinsics or time offsets as calibration types of their own.
+- **Recording length:** a recording shorter than 5 s fails (the hard floor). Shorter
+  than the recording guide's recommended 30 s of continuous data — 60 s when every lidar
+  has 32 beams or fewer — gets a warning: calibration may still work, but the recommended
+  length gives the most reliable result. When a lidar's beam count can't be read, 30 s is
+  recommended and the warning mentions that a sparse lidar wants 60 s.
+- **Lidar data:** generic `sensor_msgs/PointCloud2` from Velodyne, Ouster, Hesai and
+  RoboSense drivers, plus recognition of raw-packet topics from Hesai, Velodyne, Ouster
+  and RoboSense (only Hesai raw packets count as usable lidar; the others are flagged).
+- **Quality signals:** per-topic rates, time overlap and gaps, IMU motion excitation,
+  CameraInfo presence and plausibility, and tf-tree completeness.
+
+The server runs the same checks with the same defaults when you upload, so a recording
+that passes here passes the upload validation.
 
 No ROS installation is required. `deepen-bag-check` reads the raw bag/mcap formats
 directly in pure Python.
@@ -43,7 +67,7 @@ deepen-bag-check /path/to/ros2_bag_dir --json > report.json
 
 ```
 $ deepen-bag-check my_drive.mcap --for lidar-camera
-deepen-bag-check 1.0.2 — my_drive.mcap
+deepen-bag-check 1.2.0 — my_drive.mcap
 container: ros2_mcap
 status: WARNINGS (exit code 1)
 
@@ -78,7 +102,7 @@ Ineligible:
 |---|---|
 | `--for {lidar-camera,multi-lidar,lidar-vehicle,lidar-imu}` | Gate the exit code on whether the bag has the minimum sensor set for this calibration type. Omit to only report what the bag is eligible for. |
 | `--json` | Print the machine-readable report (see below) instead of the human-readable one. |
-| `--min-duration-s SECONDS` | Override the minimum bag duration (default: 5s). |
+| `--min-duration-s SECONDS` | Override the hard minimum bag duration (FAIL below it; default: 5 s). The recommended 30 s (60 s when every lidar has 32 beams or fewer) is a warning and is not affected by this flag. |
 | `--version` | Print the tool version. |
 
 ## What it checks
@@ -103,7 +127,7 @@ Ineligible:
    RoboSense) to canonical roles (`x`, `y`, `z`, `intensity`, `ring`, per-point `time`)
    and reports exactly which field is missing or unmappable if normalization fails.
 5. **Vendor raw-packet lidar recognition** — Hesai `pandar_msgs/PandarScan`, Velodyne
-   `velodyne_msgs/VelodyneScan`, and Ouster raw-packet topics are classified as
+   `velodyne_msgs/VelodyneScan`, Ouster and RoboSense raw-packet topics are classified as
    `lidar_raw` — recognized, never decoded. Raw Hesai packets count toward lidar
    coverage since Deepen's calibration engine decodes them natively; other raw-packet
    vendors are flagged with a warning, since generic `PointCloud2` remains the
@@ -111,7 +135,10 @@ Ineligible:
 6. **Per-calibration-type coverage** — `--for lidar-camera` (etc.) checks whether the
    bag has the minimum sensor set for that calibration mode.
 7. **Sync and quality checks** — cross-topic time overlap and gaps, per-topic message
-   rates, duration, a motion-excitation estimate from IMU angular velocity, CameraInfo
+   rates, duration (fails below 5 s; warns below the recommended 30 s, or 60 s when
+   every lidar has 32 beams or fewer — the beam count comes from the point cloud's `ring` field, an organized cloud's height, or a
+   model name in the topic such as `vlp16` or `pandar_xt32`), a motion-excitation
+   estimate from IMU angular velocity, CameraInfo
    presence and plausibility (a zeroed `K` matrix means "uncalibrated" per ROS
    convention), and tf-tree completeness for every sensor frame referenced in the bag.
 8. **Two output formats from one report** — the human-readable text above, or
@@ -125,7 +152,7 @@ Ineligible:
 ```json
 {
   "schema_version": "1.2",
-  "bag_check_version": "1.0.2",
+  "bag_check_version": "1.2.0",
   "status": "warnings",
   "container_format": "ros2_mcap",
   "requested_calibration_type": "lidar_camera",
@@ -207,6 +234,7 @@ Some lidar drivers publish raw vendor UDP packets instead of `sensor_msgs/PointC
 | Hesai | `pandar_msgs/PandarScan` | Counts as lidar coverage | Deepen's calibration engine decodes these packets natively — no conversion needed. |
 | Velodyne | `velodyne_msgs/VelodyneScan` | Does not count | Convert to `PointCloud2` with the vendor driver, or verify engine support first. |
 | Ouster | `ouster_ros/PacketMsg` (also `ouster_sensor_msgs/PacketMsg`) | Does not count | Convert to `PointCloud2` with the vendor driver, or verify engine support first. |
+| RoboSense | `rslidar_msg/RslidarPacket` (also `rslidar_msgs/rslidarScan`, `rslidar_msgs/rslidarPacket`) | Does not count | Convert to `PointCloud2` with `rslidar_sdk`, or verify engine support first. |
 
 Generic `sensor_msgs/PointCloud2` is still the preferred lane for every vendor,
 including Hesai — raw packets are a recognized fallback, not a replacement.
@@ -255,7 +283,7 @@ lidar at ~40,000 points/message. Before this fix, both were classified `lidar` a
   (stripping the last path segment, and `/compressed` if present). A rig whose
   CameraInfo topic doesn't share a namespace with its image topic won't be paired
   automatically.
-- **Non-Hesai raw-packet lidars** (Velodyne, Ouster) are recognized but not decoded,
+- **Non-Hesai raw-packet lidars** (Velodyne, Ouster, RoboSense) are recognized but not decoded,
   and don't count toward calibration-type coverage — see "Vendor raw-packet lidar
   lanes" above. Only Hesai `PandarScan` is engine-ingestible as raw packets today.
 
@@ -273,8 +301,8 @@ Tests build small synthetic bags/mcap files on the fly (see `tests/bagcheck/conf
 ### Source of truth
 
 `bagcheck/` in this repo is a published copy, kept in sync from Deepen's internal
-`deepen-automate` repo, which is the **source of truth** for this code. If you're
-looking at a bug in `bagcheck/` here, the fix needs to land in `deepen-automate` first
+`calibrate` repo, which is the **source of truth** for this code. If you're
+looking at a bug in `bagcheck/` here, the fix needs to land in `calibrate` first
 and then be ported over — see that repo's `bagcheck/README.md`, "Keeping the standalone
 copy in sync", for the procedure and the CI check (`scripts/check_bagcheck_sync.py`)
 that enforces it. Contributions/PRs to this repo are still very welcome — see
