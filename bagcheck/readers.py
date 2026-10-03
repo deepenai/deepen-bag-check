@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import sqlite3
 from abc import ABC, abstractmethod
+from bz2 import decompress as _bz2_decompress
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from lz4.frame import decompress as _lz4_decompress
 from mcap.reader import make_reader
 from mcap_ros2.decoder import DecoderFactory as _Ros2DecoderFactory
 from rosbags.rosbag1 import Reader as _Ros1Reader
@@ -28,6 +30,13 @@ from rosbags.rosbag2 import Reader as _Ros2Reader
 from rosbags.typesys import Stores, get_types_from_msg, get_typestore
 
 from bagcheck.containers import ContainerFormat, DetectedContainer, UnsupportedContainerError
+
+# `rosbags.rosbag1.Reader` resolves each chunk's compression to a decompressor *function*
+# (`Chunk.decompressor`, populated by `open()`), not the algorithm name — comparing that
+# callable's identity against the exact same module-level functions rosbags itself picks
+# from (`bz2.decompress`/`lz4.frame.decompress`) is the only way to recover which algorithm
+# a chunk used without re-parsing the bag's raw chunk headers ourselves.
+_ROS1_COMPRESSION_BY_DECOMPRESSOR = {_bz2_decompress: "bz2", _lz4_decompress: "lz4"}
 
 # ROS2 `.db3`/`.mcap` containers are read as CDR, whose wire shape matches `Stores.LATEST`
 # (a ROS2 store) exactly, so one shared typestore is correct there.
@@ -95,6 +104,13 @@ class BagReader(ABC):
     @abstractmethod
     def end_ns(self) -> int | None: ...
 
+    @property
+    def ros1_chunk_compression(self) -> str | None:
+        """`"bz2"`/`"lz4"` if this is a ROS1 `.bag` with compressed chunks, else `None`.
+        Compression is a ROS1-`.bag`-specific on-disk detail — only `_RosbagsReader` reading a `ROS1_BAG` container overrides this; every other
+        reader is never compressed in this sense."""
+        return None
+
 
 class _RosbagsReader(BagReader):
     """Shared implementation for ROS1 `.bag` and ROS2 bag-directory (sqlite3 or mcap
@@ -140,6 +156,16 @@ class _RosbagsReader(BagReader):
     @property
     def end_ns(self) -> int | None:
         return self._reader.end_time
+
+    @property
+    def ros1_chunk_compression(self) -> str | None:
+        if self.container_format is not ContainerFormat.ROS1_BAG:
+            return None
+        for chunk in self._reader.chunks.values():
+            algorithm = _ROS1_COMPRESSION_BY_DECOMPRESSOR.get(chunk.decompressor)
+            if algorithm is not None:
+                return algorithm
+        return None
 
 
 class _BareDb3Reader(BagReader):

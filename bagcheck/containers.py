@@ -89,6 +89,9 @@ def _detect_bag_file(path: Path) -> DetectedContainer:
     except OSError as exc:
         raise UnsupportedContainerError(f"{path}: cannot read file ({exc})") from exc
 
+    if not header:
+        raise UnsupportedContainerError(f"{path}: file is empty — nothing to check")
+
     if header.startswith(ROS1_BAG_MAGIC):
         return DetectedContainer(ContainerFormat.ROS1_BAG, path, is_bare_file=True)
     if header.startswith(SQLITE_MAGIC):

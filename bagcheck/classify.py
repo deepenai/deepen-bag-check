@@ -26,7 +26,7 @@ _STANDARD_ROLE_BY_TYPE: dict[str, TopicRole] = {
 # Vendor raw-UDP-packet lidar message types ("raw-packet lanes" — see the README).
 # Classification only — nothing here decodes a packet. Hesai's `pandar_msgs/PandarScan`
 # is the one vendor Deepen's calibration engine ingests natively, decoding raw Hesai
-# UDP packets directly. Velodyne/Ouster raw packets are recognized so they're not
+# UDP packets directly. Velodyne/Ouster/RoboSense raw packets are recognized so they're not
 # misclassified as [unknown], but nothing in this pipeline decodes them — generic
 # `sensor_msgs/PointCloud2` remains the preferred lane.
 LIDAR_RAW_ENGINE_VENDOR = "hesai"
@@ -36,6 +36,12 @@ _LIDAR_RAW_VENDOR_BY_TYPE: dict[str, str] = {
     "velodyne_msgs/VelodyneScan": "velodyne",
     "ouster_ros/PacketMsg": "ouster",
     "ouster_sensor_msgs/PacketMsg": "ouster",
+    # rslidar_sdk (ROS1 and ROS2) publishes `rslidar_msg/RslidarPacket`; the older
+    # ros_rslidar driver publishes per-revolution `rslidar_msgs/rslidarScan` built from
+    # `rslidar_msgs/rslidarPacket`.
+    "rslidar_msg/RslidarPacket": "robosense",
+    "rslidar_msgs/rslidarScan": "robosense",
+    "rslidar_msgs/rslidarPacket": "robosense",
 }
 
 # Non-standard message types known to carry sensor data on some vendor rigs, each with
@@ -48,6 +54,24 @@ KNOWN_CUSTOM_SENSOR_TYPES: dict[str, str] = {
     "livox_ros_driver2/CustomMsg": (
         "Livox CustomMsg is not ingested directly — convert with livox_to_pointcloud2 "
         "(https://github.com/porizou/livox_to_pointcloud2) before upload."
+    ),
+    # Foxglove's own schemas, which several public dataset conversions publish instead of the
+    # ROS message types (every Voxel51 Hilti release, for one). Without an entry here they fall
+    # through to TopicRole.UNKNOWN, and the customer is told their recording contains no lidar
+    # and no camera — a recording in which both are plainly present. That is the worst shape of
+    # refusal available: correct in outcome, actively misleading about the cause, and pointing
+    # at nothing the customer can do. A named refusal with a conversion route is the fix.
+    "foxglove.PointCloud": (
+        "Foxglove-schema point clouds are not ingested directly — re-export the recording with "
+        "ROS message types (sensor_msgs/PointCloud2) rather than Foxglove schemas."
+    ),
+    "foxglove.RawImage": (
+        "Foxglove-schema images are not ingested directly — re-export the recording with ROS "
+        "message types (sensor_msgs/Image or CompressedImage) rather than Foxglove schemas."
+    ),
+    "foxglove.CompressedImage": (
+        "Foxglove-schema images are not ingested directly — re-export the recording with ROS "
+        "message types (sensor_msgs/Image or CompressedImage) rather than Foxglove schemas."
     ),
     "ffmpeg_image_transport_msgs/FFMPEGPacket": (
         "H.264/ffmpeg-transport images are not decoded in v1 — re-record with the "

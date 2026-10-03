@@ -7,14 +7,24 @@ without building a bag.
 from __future__ import annotations
 
 import math
+import re
+from collections.abc import Mapping
 
 from bagcheck.classify import LIDAR_RAW_ENGINE_VENDOR, fixit_for_custom_type
 from bagcheck.model import CheckResult, CheckStatus, TopicRole, TopicSummary
 from bagcheck.pointcloud import normalize_fields
 from bagcheck.readers import ConnectionSummary
 
+# Hard floor: below this a bag FAILS. The CLI and the server's upload validation call the
+# same `run_checks` with the same defaults, so a bag that passes here passes on upload.
 DEFAULT_MIN_DURATION_S = 5.0
+# The recording guide's recommendation (WARN, not FAIL): 30 s of continuous driving, 60 s
+# when every lidar has 32 beams or fewer. Calibration can still work on shorter bags.
+RECOMMENDED_DURATION_S = 30.0
+SPARSE_LIDAR_RECOMMENDED_DURATION_S = 60.0
+SPARSE_LIDAR_MAX_BEAMS = 32
 DEFAULT_MIN_CUMULATIVE_YAW_DEG = 5.0
+DEFAULT_MIN_TRANSLATION_M = 1.0
 DEFAULT_MIN_OVERLAP_FRACTION = 0.5
 DEFAULT_GAP_FACTOR = 5.0
 DEFAULT_MIN_GAP_S = 1.0
@@ -42,7 +52,7 @@ def check_lidar_raw_packets(topics: list[TopicSummary]) -> list[CheckResult]:
     """Flag every vendor raw-packet lidar topic ("raw-packet lanes" — see the README).
     Hesai `pandar_msgs/PandarScan` is decoded natively by Deepen's calibration engine,
     so it's informational (PASS); other recognized raw-packet vendors (Velodyne,
-    Ouster) aren't decoded by anything in this pipeline, so they're a WARN pointing at
+    Ouster, RoboSense) aren't decoded by anything in this pipeline, so they're a WARN pointing at
     the vendor driver decode — generic `sensor_msgs/PointCloud2` is the preferred lane
     either way."""
     results: list[CheckResult] = []
@@ -75,6 +85,49 @@ def check_lidar_raw_packets(topics: list[TopicSummary]) -> list[CheckResult]:
                 )
             )
     return results
+
+
+def check_ros1_chunk_compression(
+    compression: str | None, topics: list[TopicSummary]
+) -> list[CheckResult]:
+    """Flag a ROS1 `.bag` whose chunks are lz4/bz2-compressed. `rosbags` (what this package
+    and Deepen's calibration pipeline both read with) decompresses chunks transparently, so
+    compression alone never breaks *validation* — the risk is downstream, at calibration time:
+    a bag whose lidar publishes raw Hesai packets is read by decoding those packets directly
+    off the bag, which cannot decompress a chunk on the way in (this is exactly why `/validate`
+    used to report an identical result for a compressed and decompressed copy of the same bag,
+    then let a compressed one fail later). Every other lidar lane reads generic
+    `sensor_msgs/PointCloud2`, decompressed the same way `bagcheck` itself already read it to
+    run this check — no extra action needed for those."""
+    if compression is None:
+        return []
+    has_raw_hesai_lidar = any(
+        t.role is TopicRole.LIDAR_RAW and t.vendor_signature == LIDAR_RAW_ENGINE_VENDOR
+        for t in topics
+    )
+    if has_raw_hesai_lidar:
+        return [
+            CheckResult(
+                id="ros1_chunk_compression",
+                status=CheckStatus.WARN,
+                message=(
+                    f"this bag's chunks are {compression}-compressed. Its raw lidar packets are "
+                    "read directly off the bag and cannot be decompressed on the way in — "
+                    "re-export this bag uncompressed before running a calibration on it, or "
+                    "contact support."
+                ),
+            )
+        ]
+    return [
+        CheckResult(
+            id="ros1_chunk_compression",
+            status=CheckStatus.PASS,
+            message=(
+                f"this bag's chunks are {compression}-compressed — its point-cloud topics "
+                "decompress and read normally, no action needed."
+            ),
+        )
+    ]
 
 
 def check_pointcloud_topic(topic: str, field_dtypes: dict[str, str]) -> list[CheckResult]:
@@ -154,6 +207,56 @@ def _camera_namespace(topic: str) -> str:
     if t.endswith("/compressed"):
         t = t.rsplit("/", 1)[0]
     return t.rsplit("/", 1)[0] if "/" in t else t
+
+
+def check_duplicate_cameras(topics: list[TopicSummary]) -> list[CheckResult]:
+    """Two ways one recording can hold what looks like two cameras but isn't:
+    - one topic on several channels (possible in bare MCAP/db3; bags merge by topic). The
+      pipeline keys cameras by topic, so every channel's frames land in one camera.
+    - a raw `Image` and a `CompressedImage` in the same camera namespace (the usual
+      image_transport pair). Both would be calibrated as separate cameras."""
+    results: list[CheckResult] = []
+    cams = [t for t in topics if t.role in (TopicRole.CAMERA_RAW, TopicRole.CAMERA_COMPRESSED)]
+
+    channels: dict[str, int] = {}
+    for t in cams:
+        channels[t.topic] = channels.get(t.topic, 0) + 1
+    for topic, n in channels.items():
+        if n > 1:
+            results.append(
+                CheckResult(
+                    id="camera_channels_repeated",
+                    status=CheckStatus.WARN,
+                    topic=topic,
+                    message=(
+                        f"{topic} is recorded on {n} channels; they will be treated as one "
+                        "camera. If they are different cameras, record them on separate topics."
+                    ),
+                )
+            )
+
+    by_namespace: dict[str, dict[TopicRole, list[str]]] = {}
+    for t in cams:
+        roles = by_namespace.setdefault(_camera_namespace(t.topic), {})
+        if t.topic not in roles.setdefault(t.role, []):
+            roles[t.role].append(t.topic)
+    for roles in by_namespace.values():
+        raw = roles.get(TopicRole.CAMERA_RAW, [])
+        compressed = roles.get(TopicRole.CAMERA_COMPRESSED, [])
+        if raw and compressed:
+            a, b = raw[0], compressed[0]
+            results.append(
+                CheckResult(
+                    id="camera_raw_and_compressed",
+                    status=CheckStatus.WARN,
+                    topic=b,
+                    message=(
+                        f"{a} and {b} look like the same camera (raw and compressed). "
+                        "Untick one in the sensor step to avoid calibrating it twice."
+                    ),
+                )
+            )
+    return results
 
 
 def check_camera_info(
@@ -252,7 +355,9 @@ def check_tf_completeness(
     return results
 
 
-def check_duration(duration_s: float, min_duration_s: float = DEFAULT_MIN_DURATION_S) -> CheckResult:
+def check_duration(
+    duration_s: float, min_duration_s: float = DEFAULT_MIN_DURATION_S
+) -> CheckResult:
     if duration_s < min_duration_s:
         return CheckResult(
             id="duration",
@@ -262,7 +367,76 @@ def check_duration(duration_s: float, min_duration_s: float = DEFAULT_MIN_DURATI
                 "for reliable calibration."
             ),
         )
-    return CheckResult(id="duration", status=CheckStatus.PASS, message=f"bag duration {duration_s:.1f}s.")
+    return CheckResult(
+        id="duration", status=CheckStatus.PASS, message=f"bag duration {duration_s:.1f}s."
+    )
+
+
+# Beam count from a model name in the topic, for lidars whose messages don't say (raw
+# packets, or a PointCloud2 without a ring field). Only ever used to pick the duration
+# minimum — never to decide a topic's role.
+_BEAMS_BY_NAME: tuple[tuple[re.Pattern[str], int | None], ...] = tuple(
+    (re.compile(r"(?<![a-z0-9])" + pattern + r"(?![0-9])"), beams)
+    for pattern, beams in (
+        (r"vlp[-_]?(16|32)", None),
+        (r"puck", 16),
+        (r"hdl[-_]?(32|64)", None),
+        (r"vls[-_]?(128)", None),
+        (r"xt[-_]?(16|32)", None),
+        (r"pandar[-_]?(40|64|128)", None),
+        (r"(?:qt|ot|at)[-_]?(64|128)", None),
+        (r"os[-_]?[012d][-_]?(32|64|128)", None),
+        (r"rs[-_]?(?:lidar[-_]?)?(16|32|80|128)", None),
+        (r"rslidar[-_]?(16|32|80|128)", None),
+        (r"helios[-_]?(16|32)", None),
+        (r"bpearl", 32),
+        (r"ruby", 128),
+    )
+)
+
+
+def lidar_beams_from_name(topic: str) -> int | None:
+    """The beam count named in a lidar topic (e.g. `/lidar/pandar_xt32/packets` -> 32),
+    or None when the topic names no recognisable model."""
+    name = topic.lower()
+    for pattern, beams in _BEAMS_BY_NAME:
+        match = pattern.search(name)
+        if match:
+            return beams if beams is not None else int(match.group(1))
+    return None
+
+
+def check_recommended_duration(
+    duration_s: float, lidar_beams: Mapping[str, int | None]
+) -> CheckResult | None:
+    """WARN when the bag is shorter than the recording guide recommends: 60 s when every
+    lidar is known to have 32 beams or fewer, otherwise 30 s (and, when a lidar's beam
+    count is unknown, the message says sparse lidar wants 60 s). None when long enough."""
+    sparse = {t: b for t, b in lidar_beams.items() if b is not None and b <= SPARSE_LIDAR_MAX_BEAMS}
+    unknown = sorted(t for t, b in lidar_beams.items() if b is None)
+    if lidar_beams and len(sparse) == len(lidar_beams):
+        recommended = SPARSE_LIDAR_RECOMMENDED_DURATION_S
+        named = ", ".join(f"{t}: {b} beams" for t, b in sorted(sparse.items()))
+        why = f" for lidar with {SPARSE_LIDAR_MAX_BEAMS} beams or fewer ({named})"
+    else:
+        recommended = RECOMMENDED_DURATION_S
+        why = ""
+        if unknown:
+            why = (
+                f" ({SPARSE_LIDAR_RECOMMENDED_DURATION_S:.0f}s if {', '.join(unknown)} has "
+                f"{SPARSE_LIDAR_MAX_BEAMS} beams or fewer — its beam count could not be read)"
+            )
+    if duration_s >= recommended:
+        return None
+    return CheckResult(
+        id="duration_recommended",
+        status=CheckStatus.WARN,
+        message=(
+            f"bag duration {duration_s:.1f}s is shorter than the recommended "
+            f"{recommended:.0f}s{why}. Calibration may still work; record at least "
+            f"{recommended:.0f}s of continuous driving for the most reliable result."
+        ),
+    )
 
 
 def check_motion_excitation(
@@ -302,6 +476,51 @@ def check_motion_excitation(
         message=(
             f"cumulative yaw {cumulative_deg:.1f}° over {duration_s:.1f}s — "
             "sufficient rotational excitation."
+        ),
+    )
+
+
+def check_translation_excitation(
+    range_medians: list[tuple[int, float]],
+    min_translation_m: float = DEFAULT_MIN_TRANSLATION_M,
+) -> CheckResult | None:
+    """`range_medians`: time-ordered `(timestamp_ns, median_range_m)` from subsampled
+    lidar scans. Lidar-camera calibration selects camera frames by travelled distance
+    (~1m and ~15° between kept frames) and then reconstructs camera motion from their
+    overlap — a rig that rotates in place or stands still yields one selected frame and
+    the reconstruction fails after the customer has already paid. Pure rotation of a
+    spinning lidar leaves the scene's range distribution essentially unchanged, while
+    translation shifts it, so the spread of per-scan median ranges is a cheap,
+    rotation-insensitive proxy for travelled distance. It is a proxy, not odometry:
+    limited-FOV lidars and highly dynamic scenes can move the median without rig
+    translation, so an insufficient spread is a WARN (with the consequence spelled
+    out), never an eligibility gate. Returns None when fewer than two scans were
+    rangeable — missing lidar is already flagged by schema/coverage checks."""
+    if len(range_medians) < 2:
+        return None
+    medians = [m for _, m in range_medians]
+    spread_m = max(medians) - min(medians)
+    duration_s = (range_medians[-1][0] - range_medians[0][0]) / 1e9
+
+    if spread_m < min_translation_m:
+        return CheckResult(
+            id="translation_excitation",
+            status=CheckStatus.WARN,
+            message=(
+                f"estimated scene-distance change {spread_m:.2f}m over {duration_s:.1f}s — "
+                "the rig may not travel far enough for lidar-camera calibration "
+                f"(frame selection needs ~{min_translation_m:.0f}m+ of travel between kept "
+                "frames; recordings that rotate in place or stand still fail at "
+                "reconstruction). This is an estimate from lidar range drift — if the rig "
+                "genuinely moved several meters, you can proceed."
+            ),
+        )
+    return CheckResult(
+        id="translation_excitation",
+        status=CheckStatus.PASS,
+        message=(
+            f"estimated scene-distance change {spread_m:.2f}m over {duration_s:.1f}s — "
+            "sufficient translation for lidar-camera frame selection."
         ),
     )
 
@@ -350,7 +569,9 @@ def check_topic_gaps(
     period — a likely dropped-frames window rather than a genuinely low rate."""
     if len(sorted_timestamps_ns) < 3:
         return None
-    deltas = sorted(b - a for a, b in zip(sorted_timestamps_ns, sorted_timestamps_ns[1:], strict=False))
+    deltas = sorted(
+        b - a for a, b in zip(sorted_timestamps_ns, sorted_timestamps_ns[1:], strict=False)
+    )
     median_s = deltas[len(deltas) // 2] / 1e9
     max_gap_s = deltas[-1] / 1e9
     if median_s > 0 and max_gap_s > max(gap_factor * median_s, min_gap_s):

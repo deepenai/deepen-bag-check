@@ -37,28 +37,46 @@ HZ_IMU = 100
 IMU_DT_NS = 1_000_000_000 // HZ_IMU
 LIDAR_DT_NS = 100_000_000  # 10 Hz
 DURATION_S = 8
+# The well-formed bag meets the recording guide's recommended 30 s (its lidar's beam
+# count is unknown, so 30 s rather than 60 s), so it passes with no duration warning.
+WELL_FORMED_DURATION_S = 31
 
 
 def _well_formed_bag_specs():
-    """A bag with camera+lidar+imu+camera_info+tf_static, enough duration, and real
-    rotational motion — should pass cleanly."""
+    """A bag with camera+lidar+imu+camera_info+tf_static, enough duration, real
+    rotational motion, and real translation (drifting scene ranges) — should pass
+    cleanly."""
     specs = []
-    n_imu = DURATION_S * HZ_IMU
+    n_imu = WELL_FORMED_DURATION_S * HZ_IMU
     for i in range(n_imu):
         t_ns = i * IMU_DT_NS
         wz = 0.6 if (i // HZ_IMU) % 2 == 0 else -0.6  # alternate turning, always moving
         specs.append(imu_spec("/imu", t_ns, frame_id="imu_link", wz=wz))
 
-    n_lidar = DURATION_S * 10
+    n_lidar = WELL_FORMED_DURATION_S * 10
     for i in range(n_lidar):
         specs.append(
-            pointcloud2_spec("/lidar/points", i * LIDAR_DT_NS, VENDOR_FIELD_LAYOUTS["hesai"], frame_id="lidar_link")
+            pointcloud2_spec(
+                "/lidar/points",
+                i * LIDAR_DT_NS,
+                VENDOR_FIELD_LAYOUTS["hesai"],
+                frame_id="lidar_link",
+                x_offset=0.5 * (i / 10),  # ~4m of scene-range drift = a rig that travels
+            )
         )
 
-    n_cam = DURATION_S * 10
+    n_cam = WELL_FORMED_DURATION_S * 10
     for i in range(n_cam):
-        specs.append(compressed_image_spec("/cam/front/image/compressed", i * LIDAR_DT_NS, frame_id="cam_front_link"))
-    specs.append(camera_info_spec("/cam/front/camera_info", 0, k=[600.0, 0.0, 320.0, 0.0, 600.0, 240.0, 0.0, 0.0, 1.0]))
+        specs.append(
+            compressed_image_spec(
+                "/cam/front/image/compressed", i * LIDAR_DT_NS, frame_id="cam_front_link"
+            )
+        )
+    specs.append(
+        camera_info_spec(
+            "/cam/front/camera_info", 0, k=[600.0, 0.0, 320.0, 0.0, 600.0, 240.0, 0.0, 0.0, 1.0]
+        )
+    )
 
     specs.append(tf_static_spec("/tf_static", 0, "base_link", "imu_link"))
     specs.append(tf_static_spec("/tf_static", 0, "base_link", "lidar_link"))
@@ -75,7 +93,9 @@ def test_well_formed_bag_passes_on_every_container(tmp_path: Path, writer) -> No
     path = writer(tmp_path, _well_formed_bag_specs())
     report = run_checks(path, calibration_type=CalibrationType.LIDAR_CAMERA)
 
-    assert report.status is ReportStatus.PASSED, [c.to_dict() for c in report.checks if c.status is not CheckStatus.PASS]
+    assert report.status is ReportStatus.PASSED, [
+        c.to_dict() for c in report.checks if c.status is not CheckStatus.PASS
+    ]
     assert report.exit_code() == 0
     assert CalibrationType.LIDAR_CAMERA in report.eligible_calibration_types
     lidar_topic = next(t for t in report.topics if t.role.value == "lidar")
@@ -98,7 +118,9 @@ def test_velodyne_vendor_signature_recognized_despite_pcl_alignment_padding(tmp_
         ("ring", UINT16, 20),
     ]
     specs = [
-        padded_pointcloud2_spec("/velodyne_points", i * LIDAR_DT_NS, padded_velodyne_layout, point_step=32)
+        padded_pointcloud2_spec(
+            "/velodyne_points", i * LIDAR_DT_NS, padded_velodyne_layout, point_step=32
+        )
         for i in range(5)
     ]
     report = run_checks(write_mcap(tmp_path, specs), min_duration_s=0.0)
@@ -113,7 +135,8 @@ def test_velodyne_vendor_signature_recognized_unpadded_control(tmp_path: Path) -
     layout (including its optional `time` field) must still resolve to "velodyne" —
     confirms the fix left the common, non-degraded case unchanged."""
     specs = [
-        pointcloud2_spec("/velodyne_points", i * LIDAR_DT_NS, VENDOR_FIELD_LAYOUTS["velodyne"]) for i in range(5)
+        pointcloud2_spec("/velodyne_points", i * LIDAR_DT_NS, VENDOR_FIELD_LAYOUTS["velodyne"])
+        for i in range(5)
     ]
     report = run_checks(write_mcap(tmp_path, specs), min_duration_s=0.0)
 
@@ -126,7 +149,10 @@ def test_ouster_vendor_signature_not_collided_with_velodyne_fallback(tmp_path: P
     """Collision guard: Ouster and Velodyne both use FLOAT32 intensity — exactly the
     pair the no-time fallback (above) could conflate. Ouster's real time field ('t',
     UINT32) must still win and must NOT be reported as "velodyne"."""
-    specs = [pointcloud2_spec("/lidar/points", i * LIDAR_DT_NS, VENDOR_FIELD_LAYOUTS["ouster"]) for i in range(5)]
+    specs = [
+        pointcloud2_spec("/lidar/points", i * LIDAR_DT_NS, VENDOR_FIELD_LAYOUTS["ouster"])
+        for i in range(5)
+    ]
     report = run_checks(write_mcap(tmp_path, specs), min_duration_s=0.0)
 
     lidar_topic = next(t for t in report.topics if t.role.value == "lidar")
@@ -163,7 +189,10 @@ def test_custom_type_only_lidar_fails_lidar_camera_request(tmp_path: Path) -> No
 def test_insufficient_duration_fails(tmp_path: Path) -> None:
     # Only 2s of data against the default 5s minimum.
     specs = [imu_spec("/imu", i * IMU_DT_NS, wz=0.5) for i in range(2 * HZ_IMU)]
-    specs += [pointcloud2_spec("/lidar/points", i * LIDAR_DT_NS, VENDOR_FIELD_LAYOUTS["velodyne"]) for i in range(20)]
+    specs += [
+        pointcloud2_spec("/lidar/points", i * LIDAR_DT_NS, VENDOR_FIELD_LAYOUTS["velodyne"])
+        for i in range(20)
+    ]
     path = write_mcap(tmp_path, specs)
     report = run_checks(path)
 
@@ -233,6 +262,40 @@ def test_raw_hesai_lidar_topics_make_multi_lidar_and_lidar_imu_eligible(tmp_path
     assert all(c.status is CheckStatus.PASS for c in raw_packet_checks)
 
 
+def test_uncompressed_ros1_bag_has_no_compression_check(tmp_path: Path) -> None:
+    path = write_ros1_bag(tmp_path, _well_formed_bag_specs())
+    report = run_checks(path)
+    assert [c for c in report.checks if c.id == "ros1_chunk_compression"] == []
+
+
+def test_lz4_compressed_bag_with_generic_pointcloud_lidar_is_informational(tmp_path: Path) -> None:
+    """Known gap fixed here: `/validate` used to report identical output for an lz4-compressed
+    bag and its decompressed copy, because `rosbags` (what bagcheck reads with) decompresses
+    chunks transparently — this bag has no raw-packet lidar, so the calibration engine reads
+    the same generic PointCloud2 data the same way regardless of compression."""
+    path = write_ros1_bag(tmp_path, _well_formed_bag_specs(), compression="lz4")
+    report = run_checks(path)
+
+    compression_checks = [c for c in report.checks if c.id == "ros1_chunk_compression"]
+    assert len(compression_checks) == 1
+    assert compression_checks[0].status is CheckStatus.PASS
+    assert "lz4" in compression_checks[0].message
+    assert report.status is not ReportStatus.FAILED
+
+
+def test_bz2_compressed_bag_with_raw_hesai_lidar_warns(tmp_path: Path) -> None:
+    """The one lane this check exists for: raw Hesai packets are decoded directly off the
+    bag by the calibration engine, which cannot decompress a chunk on the way in."""
+    lidar_topics = {"/lidar/pandar_packets": "pandar_msgs/PandarScan"}
+    path = write_unknown_type_ros1_bag(tmp_path, lidar_topics, compression="bz2")
+    report = run_checks(path)
+
+    compression_checks = [c for c in report.checks if c.id == "ros1_chunk_compression"]
+    assert len(compression_checks) == 1
+    assert compression_checks[0].status is CheckStatus.WARN
+    assert "bz2" in compression_checks[0].message
+
+
 def test_radar_pointcloud2_not_counted_as_lidar_regression(tmp_path: Path) -> None:
     # Regression for the real false positive found against the public Foxglove demo
     # bag: a genuine RADAR topic publishing sensor_msgs/PointCloud2 with no vendor
@@ -241,7 +304,9 @@ def test_radar_pointcloud2_not_counted_as_lidar_regression(tmp_path: Path) -> No
     # ~40,000). Before this fix, type-only classification made this LIDAR and
     # multi_lidar falsely ELIGIBLE on a bag with one real lidar and one radar.
     specs = [
-        pointcloud2_spec("/radar/points", i * LIDAR_DT_NS, RADAR_FIELD_LAYOUTS["bare_xyz"], n_points=25)
+        pointcloud2_spec(
+            "/radar/points", i * LIDAR_DT_NS, RADAR_FIELD_LAYOUTS["bare_xyz"], n_points=25
+        )
         for i in range(20)
     ]
     specs += [
@@ -266,7 +331,9 @@ def test_radar_pointcloud2_not_counted_as_lidar_regression(tmp_path: Path) -> No
     assert radar_checks[0].topic == "/radar/points"
 
     # The radar topic must not also pick up lidar-specific field-schema noise.
-    assert not [c for c in report.checks if c.topic == "/radar/points" and c.id == "pointcloud_field_schema"]
+    assert not [
+        c for c in report.checks if c.topic == "/radar/points" and c.id == "pointcloud_field_schema"
+    ]
 
 
 def test_radar_with_vendor_fields_classified_by_schema_not_density(tmp_path: Path) -> None:
@@ -291,7 +358,9 @@ def test_ambiguous_pointcloud_warns_and_is_excluded_from_lidar_coverage(tmp_path
     # must not count toward lidar coverage (the conservative default this fix exists
     # to enforce).
     specs = [
-        pointcloud2_spec("/sensor_3/points", i * LIDAR_DT_NS, RADAR_FIELD_LAYOUTS["bare_xyz"], n_points=5000)
+        pointcloud2_spec(
+            "/sensor_3/points", i * LIDAR_DT_NS, RADAR_FIELD_LAYOUTS["bare_xyz"], n_points=5000
+        )
         for i in range(20)
     ]
     path = write_mcap(tmp_path, specs)
@@ -316,7 +385,8 @@ def test_two_real_lidars_still_multi_lidar_eligible_control(tmp_path: Path) -> N
         for i in range(20)
     ]
     specs += [
-        pointcloud2_spec("/lidar/rear", i * LIDAR_DT_NS, VENDOR_FIELD_LAYOUTS["ouster"]) for i in range(20)
+        pointcloud2_spec("/lidar/rear", i * LIDAR_DT_NS, VENDOR_FIELD_LAYOUTS["ouster"])
+        for i in range(20)
     ]
     path = write_mcap(tmp_path, specs)
     report = run_checks(path, calibration_type=CalibrationType.MULTI_LIDAR, min_duration_s=0.0)
@@ -332,10 +402,14 @@ def test_json_report_round_trips_through_dict() -> None:
     report = ValidationReport(
         status=ReportStatus.WARNINGS,
         container_format="ros2_mcap",
-        topics=[TopicSummary("/lidar", "sensor_msgs/msg/PointCloud2", TopicRole.LIDAR, 10, hz=10.0)],
+        topics=[
+            TopicSummary("/lidar", "sensor_msgs/msg/PointCloud2", TopicRole.LIDAR, 10, hz=10.0)
+        ],
         checks=[CheckResult("duration", CheckStatus.PASS, "bag duration 10.0s.")],
         eligible_calibration_types=[CalibrationType.LIDAR_CAMERA],
-        ineligible_calibration_types=[IneligibleType(CalibrationType.MULTI_LIDAR, "needs >=2 lidar topics")],
+        ineligible_calibration_types=[
+            IneligibleType(CalibrationType.MULTI_LIDAR, "needs >=2 lidar topics")
+        ],
     )
     encoded = json.dumps(report.to_dict())
     decoded = json.loads(encoded)
@@ -343,3 +417,103 @@ def test_json_report_round_trips_through_dict() -> None:
     assert decoded["status"] == "warnings"
     assert decoded["topics"][0]["role"] == "lidar"
     assert decoded["eligible_calibration_types"] == ["lidar_camera"]
+
+
+def test_translation_excitation_warns_for_rotate_in_place_bag(tmp_path: Path) -> None:
+    # Every scan carries identical point ranges — the rotate-in-place signature that
+    # kills lidar-camera frame selection server-side (Z-F2).
+    specs = [imu_spec("/imu", i * IMU_DT_NS, wz=0.5) for i in range(DURATION_S * HZ_IMU)]
+    specs += [
+        pointcloud2_spec("/lidar/points", i * LIDAR_DT_NS, VENDOR_FIELD_LAYOUTS["robosense"])
+        for i in range(DURATION_S * 10)
+    ]
+    path = write_mcap(tmp_path, specs)
+    report = run_checks(path)
+
+    translation = next(c for c in report.checks if c.id == "translation_excitation")
+    assert translation.status is CheckStatus.WARN
+    assert "travel" in translation.message
+
+
+def test_translation_excitation_passes_for_driving_bag(tmp_path: Path) -> None:
+    # Median scene range drifts ~7m across the recording — real translation.
+    specs = [imu_spec("/imu", i * IMU_DT_NS, wz=0.5) for i in range(DURATION_S * HZ_IMU)]
+    n_lidar = DURATION_S * 10
+    specs += [
+        pointcloud2_spec(
+            "/lidar/points",
+            i * LIDAR_DT_NS,
+            VENDOR_FIELD_LAYOUTS["robosense"],
+            x_offset=1.2 * (i / 10),
+        )
+        for i in range(n_lidar)
+    ]
+    path = write_mcap(tmp_path, specs)
+    report = run_checks(path)
+
+    translation = next(c for c in report.checks if c.id == "translation_excitation")
+    assert translation.status is CheckStatus.PASS
+
+
+def test_translation_excitation_absent_for_multi_lidar_request(tmp_path: Path) -> None:
+    # The check is lidar-camera-specific: requesting another type keeps it out of the
+    # report (coverage-noise philosophy).
+    specs = [imu_spec("/imu", i * IMU_DT_NS, wz=0.5) for i in range(DURATION_S * HZ_IMU)]
+    specs += [
+        pointcloud2_spec("/lidar/points", i * LIDAR_DT_NS, VENDOR_FIELD_LAYOUTS["robosense"])
+        for i in range(DURATION_S * 10)
+    ]
+    path = write_mcap(tmp_path, specs)
+    report = run_checks(path, calibration_type=CalibrationType.MULTI_LIDAR)
+
+    assert not any(c.id == "translation_excitation" for c in report.checks)
+
+
+def _lidar_only_specs(seconds: int, ring_count: int | None, topic: str = "/lidar/points"):
+    # 2 Hz is plenty: the duration rule reads the bag's time span, not its message rate.
+    return [
+        pointcloud2_spec(topic, i * 500_000_000, VENDOR_FIELD_LAYOUTS["velodyne"], n_points=256, ring_count=ring_count)
+        for i in range(seconds * 2 + 1)
+    ]
+
+
+def _duration_checks(report: ValidationReport) -> dict[str, CheckResult]:
+    return {c.id: c for c in report.checks if c.id.startswith("duration")}
+
+
+def test_32_beam_lidar_under_60s_warns_but_does_not_fail(tmp_path: Path) -> None:
+    report = run_checks(write_mcap(tmp_path, _lidar_only_specs(45, ring_count=32)))
+    found = _duration_checks(report)
+    assert found["duration"].status is CheckStatus.PASS
+    assert found["duration_recommended"].status is CheckStatus.WARN
+    message = found["duration_recommended"].message
+    assert "recommended 60s" in message and "32 beams" in message and "may still work" in message
+
+
+def test_64_beam_lidar_over_30s_has_no_duration_warning(tmp_path: Path) -> None:
+    report = run_checks(write_mcap(tmp_path, _lidar_only_specs(31, ring_count=64)))
+    found = _duration_checks(report)
+    assert found["duration"].status is CheckStatus.PASS
+    assert "duration_recommended" not in found
+
+
+def test_unknown_beams_recommends_30s_and_mentions_60s(tmp_path: Path) -> None:
+    short = run_checks(write_mcap(tmp_path, _lidar_only_specs(20, ring_count=None), name="short.mcap"))
+    warning = _duration_checks(short)["duration_recommended"]
+    assert warning.status is CheckStatus.WARN
+    assert "recommended 30s" in warning.message and "60s if" in warning.message
+    longer = run_checks(write_mcap(tmp_path, _lidar_only_specs(31, ring_count=None), name="long.mcap"))
+    assert "duration_recommended" not in _duration_checks(longer)
+
+
+def test_below_the_hard_floor_fails(tmp_path: Path) -> None:
+    report = run_checks(write_mcap(tmp_path, _lidar_only_specs(3, ring_count=64)))
+    assert _duration_checks(report)["duration"].status is CheckStatus.FAIL
+    assert report.status is ReportStatus.FAILED
+
+
+def test_min_duration_s_overrides_only_the_floor(tmp_path: Path) -> None:
+    report = run_checks(write_mcap(tmp_path, _lidar_only_specs(10, ring_count=32)), min_duration_s=12.0)
+    found = _duration_checks(report)
+    assert found["duration"].status is CheckStatus.FAIL
+    assert found["duration_recommended"].status is CheckStatus.WARN
